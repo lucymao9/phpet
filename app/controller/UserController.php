@@ -43,13 +43,11 @@ class UserController
         return Response::json(['dto'=>$dto])->status(200);
     }
 
+    #[Route('/user/batch', methods: ['POST'])]
     public function batchAdd(
-        #[ValidateGroup('batchCreate')] #[FromEach(CreateUserDto::class)] array $list
+        #[ValidateGroup('create')] #[FromEach(CreateUserDto::class)] array $list
     )
     {
-        foreach ($list as $dto){
-            echo $dto->username;
-        }
         return Response::json(['list'=>$list])->status(200);
     }
 
