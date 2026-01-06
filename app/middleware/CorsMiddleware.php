@@ -28,7 +28,7 @@ class CorsMiddleware implements \phpet\core\middleware\MiddlewareInterface
         }
     }
 
-    public function after(?Response $response, ?\Exception $exception=null)
+    public function after(?Response $response, ?\Throwable $exception=null)
     {
         foreach ($this->headers as $k => $v) {
             header("$k: $v");

@@ -12,7 +12,7 @@ class LogMiddleware implements MiddlewareInterface
     {
     }
 
-    public function after(?Response $response, ?\Exception $exception=null)
+    public function after(?Response $response, ?\Throwable $exception=null)
     {
         return $response;
     }

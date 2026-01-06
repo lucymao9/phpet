@@ -32,7 +32,6 @@ class Validator
         string $path = '',
     ): array
     {
-        $errors = [];
         $ref = new ReflectionClass($dto);
 
         foreach ($ref->getProperties() as $prop) {
@@ -43,9 +42,6 @@ class Validator
                 ? $prop->getValue($dto)
                 : null;
 
-            if (is_array($value)) {
-                $this->validateEach($prop, $value, $path);
-            }
             foreach ($prop->getAttributes() as $attr) {
                 $rule = $attr->newInstance();
 
@@ -78,49 +74,11 @@ class Validator
                         $group,
                         $fullPath
                     );
-//                    $errors = array_merge_recursive($errors, $childErrors);
                 }
 
             }
         }
         return $this->errors;
-    }
-
-    private function validateEach(
-        ReflectionProperty $prop,
-        array $values,
-        string $path
-    ): void {
-        $attrs = $prop->getAttributes(Each::class);
-        if (!$attrs) {
-            return;
-        }
-
-        /** @var Each $each */
-        $each = $attrs[0]->newInstance();
-
-        foreach ($values as $index => $item) {
-            $itemPath = $path . '.' . $index;
-
-            // ① DTO 模式
-            if ($each->dto) {
-                if (!is_array($item)) {
-                    $this->addError($itemPath, 'must be object');
-                    continue;
-                }
-
-                $dto = $this->hydrator->hydrate($each->dto, $item);
-                $this->validate($dto, $itemPath);
-                continue;
-            }
-
-            // ② 基础类型规则模式
-            foreach ($each->rules as $rule) {
-                if (!$rule->validate($item)) {
-                    $this->addError($itemPath, $rule->message());
-                }
-            }
-        }
     }
 
     private function addError(string $itemPath, $message)

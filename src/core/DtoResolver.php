@@ -10,19 +10,20 @@ class DtoResolver
         private Request $request
     ) {}
 
-    public function resolve(string $class): object
+    public function resolve(string $class,  $item = null): object
     {
         $ref = new ReflectionClass($class);
         $dto = $ref->newInstance();
 
         foreach ($ref->getProperties() as $prop) {
             $name = $prop->getName();
-
-            $value = $this->request->body($name)
-                ?? $this->request->query($name);
+            
+            $value = $item[$name] ?? ($this->request->body($name)
+                ?? $this->request->query($name));
 
             if ($value !== null) {
                 $type = $prop->getType()?->getName();
+
                 if ($type && class_exists($type)) {
                     // 👇 嵌套 DTO
                     $child = new $type();
@@ -43,4 +44,5 @@ class DtoResolver
 
         return $dto;
     }
+
 }

@@ -15,6 +15,4 @@ class CreateUserDto extends BaseDto
     #[Valid]
     public ?AddressDto $address = null;
 
-    #[Each(dto: CreateUserDto::class)]
-    public ?array $users = null;
 }

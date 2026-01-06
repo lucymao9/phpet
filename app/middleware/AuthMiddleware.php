@@ -13,7 +13,7 @@ class AuthMiddleware implements MiddlewareInterface
     public function before(?Request $request)
     {
     }
-    public function after(?Response $response, ?\Exception $exception=null)
+    public function after(?Response $response, ?\Throwable $exception=null)
     {
         return $response;
     }

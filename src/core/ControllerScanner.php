@@ -180,6 +180,7 @@ class ControllerScanner
                 }
             }
 
+            // FromCookie
             $cookieAttr = $param->getAttributes(FromCookie::class)[0] ?? null;
             if ($cookieAttr) {
                 $key = $cookieAttr->newInstance()->name ?? $name;
@@ -191,19 +192,39 @@ class ControllerScanner
                 }
             }
 
-            // Each
+            // FromEach
             $eachAttr = $param->getAttributes(FromEach::class)[0] ?? null;
             if ($eachAttr) {
                 $key = $eachAttr->newInstance()->name ?? $name;
-                $dto = $eachAttr->newInstance()->dto;
+                $dtoClass = $eachAttr->newInstance()->dto;
+                file_put_contents('debug.log',json_encode($dtoClass).PHP_EOL,FILE_APPEND);
                 $value = $bodyData[$key] ?? null;
-                if (class_exists($dto)
-                    && is_subclass_of($dto, BaseDto::class)
-                ) {
-                if ($value !== null) {
+                if (class_exists($dtoClass)
+                    && is_subclass_of($dtoClass, BaseDto::class)
+                    && $value !== null) {
+                    $group = 'default';
+                    $attrs = $param->getAttributes(ValidateGroup::class);
+                    if ($attrs) {
+                        $group = $attrs[0]->newInstance()->group;
+                    }
+                    $refDtoClass = new ReflectionClass($dtoClass);
+                    $each = [];
+                    
+                    foreach ($value as $item){
+                        $each[] = $dto = $this->container
+                            ->get(DtoResolver::class)
+                            ->resolve($dtoClass,$item);
+                        $attrs = $refDtoClass->getAttributes(ValidateGroup::class);
+                        if ($attrs) {
+                            $group = $attrs[0]->newInstance()->group;
+                        }
+                        file_put_contents('debug.log',json_encode($group).PHP_EOL,FILE_APPEND);
+                        file_put_contents('debug.log',json_encode($dto).PHP_EOL,FILE_APPEND);
+                        $this->container->get(Validator::class)->validate($dto, $group);
+                    }
                     $args[] = $this->castType($value, $param);
                     continue;
-                }}
+                }
             }
 
             // DTO 自动注入
@@ -216,7 +237,7 @@ class ControllerScanner
                 if ($attrs) {
                     $group = $attrs[0]->newInstance()->group;
                 }
-                $args[] = $this->container
+                $args[] = $dto = $this->container
                     ->get(DtoResolver::class)
                     ->resolve($type);
                 $this->container->get(Validator::class)->validate($dto, $group);

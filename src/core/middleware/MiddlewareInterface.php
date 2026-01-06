@@ -8,5 +8,5 @@ use phpet\core\Response;
 interface MiddlewareInterface
 {
     public function before(?Request $request);
-    public function after(?Response $response, ?\Exception $exception=null);
+    public function after(?Response $response, ?\Throwable $exception=null);
 }
