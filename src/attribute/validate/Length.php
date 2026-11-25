@@ -10,6 +10,7 @@ class Length
     public function __construct(
         public int $min = 0,
         public int $max = PHP_INT_MAX,
-        public array $groups = ['default'],
+        public array $groups = [],
+        public ?string $message = null,
     ) {}
 }

@@ -3,7 +3,6 @@
 namespace app\dto;
 
 use phpet\attribute\validate\Length;
-use phpet\attribute\validate\Range;
 use phpet\attribute\validate\Required;
 
 class AddressDto

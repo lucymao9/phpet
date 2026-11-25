@@ -79,6 +79,12 @@ class Response
             header("{$key}: {$value}");
         }
 
+        // HEAD 与 204/304 不返回响应体
+        $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+        if (strtoupper($method) === 'HEAD' || in_array($this->status, [204, 304], true)) {
+            return;
+        }
+
         echo $this->content;
     }
 

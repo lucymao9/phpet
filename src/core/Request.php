@@ -2,13 +2,16 @@
 
 namespace phpet\core;
 
+use phpet\core\Exception\BadRequestException;
+
 class Request
 {
     public function __construct(
         private array $query,
         private array $body,
         private array $server,
-        private array $headers
+        private array $headers,
+        private array $files = []
     ) {}
 
     public static function fromGlobals(): self
@@ -31,9 +34,24 @@ class Request
         }
 
         $rawBody = file_get_contents('php://input');
-        $body = json_decode($rawBody, true) ?? $_POST;
 
-        return new self($_GET, $body, $_SERVER, $headers);
+        if (str_contains($headers['content-type'] ?? '', 'json')) {
+            if (trim((string)$rawBody) === '') {
+                $body = [];
+            } else {
+                $body = json_decode((string)$rawBody, true);
+                if (json_last_error() !== JSON_ERROR_NONE) {
+                    throw new BadRequestException('Malformed JSON body: ' . json_last_error_msg());
+                }
+                if (!is_array($body)) {
+                    throw new BadRequestException('JSON body must be an object or array');
+                }
+            }
+        } else {
+            $body = $_POST;
+        }
+
+        return new self($_GET, $body, $_SERVER, $headers, $_FILES);
     }
 
     public function query(string $key, $default = null)
@@ -53,12 +71,18 @@ class Request
 
     public function method(): string
     {
-        return $this->server['REQUEST_METHOD'];
+        return strtoupper($this->server['REQUEST_METHOD'] ?? 'GET');
     }
 
     public function path(): string
     {
-        return parse_url($this->server['REQUEST_URI'], PHP_URL_PATH);
+        $uri = (string)($this->server['REQUEST_URI'] ?? '/');
+
+        // 不用 parse_url：`//api/x` 会被当成 host=api、path=/x
+        $path = explode('?', $uri, 2)[0];
+        $path = explode('#', $path, 2)[0];
+
+        return $path === '' ? '/' : $path;
     }
 
     public function getQuery(): array
@@ -85,5 +109,56 @@ class Request
     public function isJson(): bool
     {
         return str_contains($this->header('content-type', ''), 'json');
+    }
+
+    /**
+     * 统一取值：先查请求体，再查 query。
+     */
+    public function input(string $key, $default = null)
+    {
+        return $this->body[$key] ?? $this->query[$key] ?? $default;
+    }
+
+    public function has(string $key): bool
+    {
+        return array_key_exists($key, $this->body) || array_key_exists($key, $this->query);
+    }
+
+    /**
+     * 单个上传文件的原始信息（$_FILES 结构），没有则返回 null。
+     */
+    public function file(string $key): ?array
+    {
+        return $this->files[$key] ?? null;
+    }
+
+    /**
+     * @return array<string, array>
+     */
+    public function files(): array
+    {
+        return $this->files;
+    }
+
+    public function hasFile(string $key): bool
+    {
+        return isset($this->files[$key])
+            && ($this->files[$key]['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_NO_FILE;
+    }
+
+    /**
+     * 客户端 IP。默认只信任 REMOTE_ADDR；
+     * 确实部署在反向代理后面时才传 $trustProxy = true 读取 X-Forwarded-For。
+     */
+    public function clientIp(bool $trustProxy = false): string
+    {
+        if ($trustProxy) {
+            $forwarded = $this->header('x-forwarded-for');
+            if (is_string($forwarded) && $forwarded !== '') {
+                return trim(explode(',', $forwarded)[0]);
+            }
+        }
+
+        return (string)($this->server['REMOTE_ADDR'] ?? '');
     }
 }

@@ -26,22 +26,24 @@ class CorsMiddleware implements MiddlewareInterface
     ) {
     }
 
-    public function before(?Request $request)
+    public function before(?Request $request): ?Response
     {
         $this->origin = $request?->header('origin');
 
-        // 预检请求直接返回
+        // 预检请求直接短路返回 204，不再进入控制器
         $method = $request?->method() ?? ($_SERVER['REQUEST_METHOD'] ?? 'GET');
-        if ($method === 'OPTIONS') {
+        if (strtoupper($method) === 'OPTIONS') {
+            $preflight = (new Response())->status(204);
             foreach ($this->buildHeaders() as $k => $v) {
-                header("{$k}: {$v}");
+                $preflight->header($k, $v);
             }
-            http_response_code(204);
-            exit;
+            return $preflight;
         }
+
+        return null;
     }
 
-    public function after(?Response $response, ?\Throwable $exception = null)
+    public function after(?Response $response, ?\Throwable $exception = null): ?Response
     {
         $headers = $this->buildHeaders();
 

@@ -9,6 +9,7 @@ class Each
 {
     public function __construct(
         public ?string $dto = null,
-        public array $rules = []
+        public array $rules = [],
+        public ?string $message = null,
     ) {}
 }

@@ -2,8 +2,6 @@
 
 namespace app\dto;
 
-use phpet\attribute\validate\Each;
-use phpet\attribute\validate\Required;
 use phpet\attribute\validate\Valid;
 use phpet\core\BaseDto;
 

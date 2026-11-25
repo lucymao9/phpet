@@ -38,9 +38,16 @@ class ExceptionHandler
         }
 
         if ($e instanceof HttpException) {
-            return Response::json([
+            $response = Response::json([
                 'message' => $e->getMessage()
             ])->status($e->getStatus());
+
+            // 405 需要告诉客户端该路径支持哪些方法
+            if ($e instanceof MethodNotAllowedException && $e->getAllowed() !== []) {
+                $response->header('Allow', implode(', ', $e->getAllowed()));
+            }
+
+            return $response;
         }
 
         $payload = [

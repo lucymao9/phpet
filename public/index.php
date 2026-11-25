@@ -2,7 +2,6 @@
 
 namespace app;
 
-use app\controller\UserController;
 use app\middleware\AuthMiddleware;
 use app\middleware\CorsMiddleware;
 use app\middleware\LogMiddleware;
@@ -10,6 +9,7 @@ use phpet\core\Container;
 use phpet\core\ControllerScanner;
 use phpet\core\Exception\ExceptionHandler;
 use phpet\core\Log\Logger;
+use phpet\core\middleware\MiddlewarePipeline;
 use phpet\core\middleware\MiddlewareRegistry;
 use phpet\core\Request;
 use phpet\core\Response;
@@ -37,38 +37,56 @@ date_default_timezone_set(getenv('APP_TIMEZONE') ?: 'Asia/Shanghai');
 
 Logger::init(null, $debug ? Logger::DEBUG : Logger::INFO);
 
-$container = new Container();
-$request = Request::fromGlobals();
-$container->singleton(Request::class, $request);
-
-$registry = new MiddlewareRegistry();
-$registry->register('auth', AuthMiddleware::class);
-$registry->register('log', LogMiddleware::class);
-// 需要跨域携带 Cookie 时，改为：register('cors', CorsMiddleware::class, [['https://your.site'], true])
-$registry->register('cors', CorsMiddleware::class);
-
 // ExceptionHandler 可自定义；debug 模式下 500 响应会附带异常细节
-$router = new Router(new ExceptionHandler($debug));
-$router->addGlobalMiddleware('cors');
-$scanner = new ControllerScanner($router, $registry, $container);
-
-// 扫描控制器（当前为手工登记，后续可扩展为目录扫描）
-$scanner->scan(UserController::class);
+$exceptionHandler = new ExceptionHandler($debug);
 
 try {
-    $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
-    $uri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+    $container = new Container();
 
-    $response = $router->dispatch($method, $uri);
+    // 中间件注册提前到解析请求之前：请求体解析失败时也补得上 CORS 头
+    $registry = new MiddlewareRegistry();
+    $registry->register('auth', AuthMiddleware::class);
+    $registry->register('log', LogMiddleware::class);
+    // 需要跨域携带 Cookie 时：
+    // $registry->register('cors', CorsMiddleware::class, [['https://your.site'], true]);
+    $registry->register('cors', CorsMiddleware::class);
 
-    if ($response instanceof Response) {
-        $response->send();
-        exit;
+    $request = Request::fromGlobals();
+    $container->singleton(Request::class, $request);
+
+    $router = new Router($exceptionHandler);
+    $scanner = new ControllerScanner($router, $registry, $container);
+
+    // 扫描 app/controller 下所有带 #[Controller] 的类
+    $controllers = $scanner->scanDirectory(__DIR__ . '/../app/controller', 'app\controller');
+    if ($controllers === []) {
+        throw new \RuntimeException('No controllers found under app/controller');
     }
 
-    // 兜底兼容（字符串 / 数组）
-    Response::text(is_scalar($response) ? (string)$response : '')
-        ->send();
+    // 全局中间件包在路由外层，404/405 等未命中路由的响应也能带上 CORS 头
+    $pipeline = new MiddlewarePipeline($registry, $request);
+    $response = $pipeline->handle(
+        ['cors'],
+        fn() => $router->dispatch($request->method(), $request->path())
+    );
+
+    if (!$response instanceof Response) {
+        // 兜底兼容（字符串 / 数组）
+        $response = is_array($response)
+            ? Response::json($response)
+            : Response::text(is_scalar($response) ? (string)$response : '');
+    }
+
+    $response->send();
 } catch (\Throwable $e) {
-    (new ExceptionHandler($debug))->handle($e)->send();
+    $response = $exceptionHandler->handle($e);
+
+    // 引导阶段就失败时，尽量补上 CORS 头，避免浏览器只看到跨域错误
+    try {
+        $response = $registry->resolve('cors')->after($response) ?? $response;
+    } catch (\Throwable) {
+        // 中间件不可用时忽略
+    }
+
+    $response->send();
 }

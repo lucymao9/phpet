@@ -8,7 +8,8 @@ use Attribute;
 class Required
 {
     public function __construct(
-        public array $groups = ['default'],
+        public array $groups = [],
+        public ?string $message = null,
     )
     {
     }

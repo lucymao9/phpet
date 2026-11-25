@@ -12,7 +12,8 @@ use phpet\attribute\request\FromQuery;
 use phpet\attribute\Route;
 use phpet\attribute\validate\ValidateGroup;
 use phpet\core\Exception\BadRequestException;
-use phpet\core\middleware\MiddlewareInterface;
+use phpet\core\Log\Logger;
+use phpet\core\middleware\MiddlewarePipeline;
 use phpet\core\middleware\MiddlewareRegistry;
 use ReflectionClass;
 use ReflectionMethod;
@@ -27,6 +28,65 @@ class ControllerScanner
         private Container          $container,
     )
     {
+    }
+
+    /**
+     * 递归扫描目录下所有带 #[Controller] 的类并注册路由。
+     *
+     * @return string[] 实际注册的控制器类名
+     */
+    public function scanDirectory(string $directory, string $namespace): array
+    {
+        $directory = rtrim($directory, '/\\');
+        if (!is_dir($directory)) {
+            throw new \RuntimeException("Controller directory not found: {$directory}");
+        }
+
+        $namespace = trim($namespace, '\\');
+        $scanned = [];
+
+        $files = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($directory, \FilesystemIterator::SKIP_DOTS)
+        );
+
+        foreach ($files as $file) {
+            if (!$file->isFile() || strtolower($file->getExtension()) !== 'php') {
+                continue;
+            }
+
+            $class = $this->classFromFile($file->getPathname(), $directory, $namespace);
+            if ($class === null || !class_exists($class)) {
+                Logger::debug('Skip non-loadable controller file', ['file' => $file->getPathname()]);
+                continue;
+            }
+
+            $ref = new ReflectionClass($class);
+            if (!$ref->isInstantiable() || $ref->getAttributes(Controller::class) === []) {
+                continue;
+            }
+
+            $this->scan($class);
+            $scanned[] = $class;
+        }
+
+        sort($scanned);
+
+        return $scanned;
+    }
+
+    /**
+     * 按 PSR-4 约定由文件路径推导类名。
+     */
+    private function classFromFile(string $file, string $baseDir, string $namespace): ?string
+    {
+        $relative = substr($file, strlen($baseDir) + 1);
+        if ($relative === '' || $relative === false) {
+            return null;
+        }
+
+        $className = str_replace(['/', '\\'], '\\', preg_replace('#\.php$#i', '', $relative));
+
+        return $namespace === '' ? $className : $namespace . '\\' . $className;
     }
 
     public function scan(string $controllerClass)
@@ -44,7 +104,6 @@ class ControllerScanner
         $classMiddlewares = $this->collectMiddlewareNames(
             $refClass->getAttributes(Middleware::class)
         );
-        $globalMiddlewares = $this->router->getGlobalMiddlewares();
 
         foreach ($refClass->getMethods(ReflectionMethod::IS_PUBLIC) as $method) {
             foreach ($method->getAttributes(Route::class) as $attr) {
@@ -54,7 +113,7 @@ class ControllerScanner
                 $methodMiddlewares = $this->collectMiddlewareNames(
                     $method->getAttributes(Middleware::class)
                 );
-                $middlewares = array_merge($globalMiddlewares, $classMiddlewares, $methodMiddlewares);
+                $middlewares = array_merge($classMiddlewares, $methodMiddlewares);
 
                 foreach ($route->methods as $httpMethod) {
                     $this->router->add(
@@ -68,6 +127,17 @@ class ControllerScanner
                         }
                     );
                 }
+
+                // 预检占位路由：让 cors 中间件有机会短路返回 204；
+                // 未启用 cors 时也返回 204 而不是 405
+                $this->router->add(
+                    'OPTIONS',
+                    $path,
+                    fn() => $this->executeWithMiddleware(
+                        $middlewares,
+                        fn() => (new Response())->status(204)
+                    )
+                );
             }
         }
     }
@@ -85,46 +155,14 @@ class ControllerScanner
         );
     }
 
-    private function executeWithMiddleware(array $middlewares, callable $handler)
+    private function executeWithMiddleware(array $middlewares, callable $handler): Response
     {
-        $request = $this->container->get(Request::class);
-        /** @var MiddlewareInterface[] $instances 只包含 before() 已执行过的中间件 */
-        $instances = [];
-        $result = null;
-        $exception = null;
+        $pipeline = new MiddlewarePipeline(
+            $this->middlewareRegistry,
+            $this->container->get(Request::class)
+        );
 
-        try {
-            foreach ($middlewares as $name) {
-                $middleware = $this->middlewareRegistry->resolve($name);
-                $instances[] = $middleware;
-                $middleware->before($request);
-            }
-
-            $result = $handler();
-
-            if (!$result instanceof Response) {
-                if (is_array($result) || is_object($result)) {
-                    $result = Response::json((array)$result);
-                } elseif ($result === null) {
-                    $result = Response::text('');
-                } else {
-                    $result = Response::text((string)$result);
-                }
-            }
-        } catch (\Throwable $e) {
-            $exception = $e;
-            throw $e;
-        } finally {
-            foreach (array_reverse($instances) as $middleware) {
-                $after = $middleware->after($result, $exception);
-                // 约定返回 null 表示中间件不改写响应
-                if ($after !== null) {
-                    $result = $after;
-                }
-            }
-        }
-
-        return $result;
+        return $pipeline->handle($middlewares, $handler);
     }
 
     private function resolveArguments(
