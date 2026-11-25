@@ -1,6 +1,7 @@
 /vendor/
 /runtime/
 .claude/
+.workbuddy/
 *.log
 CLAUDE.md
 *.code-workspace

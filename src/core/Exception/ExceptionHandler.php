@@ -8,9 +8,12 @@ use Throwable;
 
 class ExceptionHandler
 {
+    private ErrorRenderer $renderer;
+
     public function __construct(
         private bool $debug = false,
     ) {
+        $this->renderer = new ErrorRenderer($debug);
     }
 
     public function handle(Throwable $e): Response
@@ -18,36 +21,37 @@ class ExceptionHandler
         $requestId = $this->requestId();
         $status = $e instanceof HttpException ? $e->getStatus() : 500;
 
-        // 4xx 属于正常业务流，按 warning 记录且不带堆栈；5xx 才算 error
-        $context = [
-            'requestId' => $requestId,
-            'exception' => get_class($e),
-            'file' => $e->getFile() . ':' . $e->getLine(),
-        ];
-        if ($status >= 500) {
-            $context['trace'] = $e->getTraceAsString();
+        $this->log($e, $status, $requestId);
+
+        $payload = $this->payload($e, $status, $requestId);
+
+        // 浏览器导航请求给排版后的错误页，接口调用继续返回 JSON
+        $response = $this->renderer->wantsHtml()
+            ? Response::html($this->renderer->html($e, $status, $requestId, $payload), $status)
+            : Response::json($payload, $status);
+
+        // 405 需要告诉客户端该路径支持哪些方法
+        if ($e instanceof MethodNotAllowedException && $e->getAllowed() !== []) {
+            $response->header('Allow', implode(', ', $e->getAllowed()));
         }
 
-        Logger::log($status >= 500 ? Logger::ERROR : Logger::WARNING, $e->getMessage(), $context);
+        return $response;
+    }
 
+    /**
+     * @return array<string, mixed>
+     */
+    private function payload(Throwable $e, int $status, string $requestId): array
+    {
         if ($e instanceof ValidationException) {
-            return Response::json([
+            return [
                 'message' => $e->getMessage(),
-                'errors' => $e->errors
-            ])->status(400);
+                'errors' => $e->errors,
+            ];
         }
 
         if ($e instanceof HttpException) {
-            $response = Response::json([
-                'message' => $e->getMessage()
-            ])->status($e->getStatus());
-
-            // 405 需要告诉客户端该路径支持哪些方法
-            if ($e instanceof MethodNotAllowedException && $e->getAllowed() !== []) {
-                $response->header('Allow', implode(', ', $e->getAllowed()));
-            }
-
-            return $response;
+            return ['message' => $e->getMessage()];
         }
 
         $payload = [
@@ -62,7 +66,26 @@ class ExceptionHandler
             $payload['file'] = $e->getFile() . ':' . $e->getLine();
         }
 
-        return Response::json($payload)->status(500);
+        return $payload;
+    }
+
+    private function log(Throwable $e, int $status, string $requestId): void
+    {
+        // 4xx 属于正常业务流，按 warning 记录且不带堆栈；5xx 才算 error
+        $context = [
+            'requestId' => $requestId,
+            'exception' => get_class($e),
+            'file' => $e->getFile() . ':' . $e->getLine(),
+        ];
+        if ($status >= 500) {
+            $context['trace'] = $e->getTraceAsString();
+        }
+
+        Logger::log(
+            $status >= 500 ? Logger::ERROR : Logger::WARNING,
+            $e->getMessage(),
+            $context
+        );
     }
 
     private function requestId(): string

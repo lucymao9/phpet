@@ -111,6 +111,46 @@ class Request
         return str_contains($this->header('content-type', ''), 'json');
     }
 
+    public function accept(): string
+    {
+        return (string)$this->header('accept', '');
+    }
+
+    /**
+     * 客户端是否接受指定类型，如 accepts('application/json')。
+     */
+    public function accepts(string $type): bool
+    {
+        $accept = strtolower($this->accept());
+
+        return $accept !== ''
+            && (str_contains($accept, strtolower($type)) || str_contains($accept, '*/*'));
+    }
+
+    /**
+     * 是否希望拿到 JSON。
+     *
+     * 显式声明 text/html 且把 JSON 排在后面的（浏览器导航请求）返回 false；
+     * curl 这类只发通配符的按 JSON 处理。
+     */
+    public function wantsJson(): bool
+    {
+        $accept = strtolower($this->accept());
+
+        if ($accept === '' || $accept === '*/*') {
+            return true;
+        }
+
+        $html = strpos($accept, 'text/html');
+        if ($html === false) {
+            return true;
+        }
+
+        $json = strpos($accept, 'application/json');
+
+        return $json !== false && $json < $html;
+    }
+
     /**
      * 统一取值：先查请求体，再查 query。
      */

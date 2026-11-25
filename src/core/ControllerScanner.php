@@ -12,6 +12,7 @@ use phpet\attribute\request\FromQuery;
 use phpet\attribute\Route;
 use phpet\attribute\validate\ValidateGroup;
 use phpet\core\Exception\BadRequestException;
+use phpet\core\Exception\ValidationException;
 use phpet\core\Log\Logger;
 use phpet\core\middleware\MiddlewarePipeline;
 use phpet\core\middleware\MiddlewareRegistry;
@@ -301,14 +302,27 @@ class ControllerScanner
         $validator = $this->container->get(Validator::class);
 
         $items = [];
+        $errors = [];
+
         foreach ($raw as $index => $item) {
             if (!is_array($item)) {
                 throw new BadRequestException("\${$name}[{$index}] must be an object");
             }
             // 显式传入 item，避免嵌套字段回落到全局 body
             $dto = $resolver->resolve($dtoClass, $item);
-            $validator->validate($dto, $group);
             $items[] = $dto;
+
+            try {
+                // 带索引前缀，出错时能定位到具体第几条
+                $validator->validate($dto, $group, "{$key}.{$index}");
+            } catch (ValidationException $e) {
+                // 收集所有条目的错误一次性抛出，而不是遇到第一条就中断
+                $errors += $e->errors;
+            }
+        }
+
+        if ($errors !== []) {
+            throw new ValidationException($errors);
         }
 
         return $items;
