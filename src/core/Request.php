@@ -22,6 +22,14 @@ class Request
             }
         }
 
+        // CONTENT_TYPE / CONTENT_LENGTH 不带 HTTP_ 前缀，需要单独兜底，
+        // 否则 FromHeader('Content-Type') 永远取不到值
+        foreach (['CONTENT_TYPE', 'CONTENT_LENGTH'] as $key) {
+            if (isset($_SERVER[$key]) && !isset($headers[strtolower(str_replace('_', '-', $key))])) {
+                $headers[strtolower(str_replace('_', '-', $key))] = $_SERVER[$key];
+            }
+        }
+
         $rawBody = file_get_contents('php://input');
         $body = json_decode($rawBody, true) ?? $_POST;
 
@@ -56,5 +64,26 @@ class Request
     public function getQuery(): array
     {
         return $this->query;
+    }
+
+    /**
+     * 获取完整请求体（已解析的 JSON 或表单数据）
+     */
+    public function all(): array
+    {
+        return $this->body;
+    }
+
+    /**
+     * 获取全部请求头，键名统一小写
+     */
+    public function headers(): array
+    {
+        return $this->headers;
+    }
+
+    public function isJson(): bool
+    {
+        return str_contains($this->header('content-type', ''), 'json');
     }
 }

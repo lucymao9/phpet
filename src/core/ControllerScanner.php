@@ -6,14 +6,18 @@ use phpet\attribute\Controller;
 use phpet\attribute\Middleware;
 use phpet\attribute\request\FromBody;
 use phpet\attribute\request\FromCookie;
+use phpet\attribute\request\FromEach;
 use phpet\attribute\request\FromHeader;
 use phpet\attribute\request\FromQuery;
 use phpet\attribute\Route;
-use phpet\attribute\request\FromEach;
 use phpet\attribute\validate\ValidateGroup;
+use phpet\core\Exception\BadRequestException;
+use phpet\core\middleware\MiddlewareInterface;
 use phpet\core\middleware\MiddlewareRegistry;
 use ReflectionClass;
 use ReflectionMethod;
+use ReflectionNamedType;
+use ReflectionParameter;
 
 class ControllerScanner
 {
@@ -29,32 +33,30 @@ class ControllerScanner
     {
         $refClass = new ReflectionClass($controllerClass);
         $controller = $this->container->get($controllerClass);
+
+        // 类级注解只需解析一次，不必放进方法循环
+        $prefix = '';
+        $controllerAttrs = $refClass->getAttributes(Controller::class);
+        if (!empty($controllerAttrs)) {
+            /** @var Controller $controllerAttr */
+            $prefix = rtrim($controllerAttrs[0]->newInstance()->prefix, '/');
+        }
+        $classMiddlewares = $this->collectMiddlewareNames(
+            $refClass->getAttributes(Middleware::class)
+        );
+        $globalMiddlewares = $this->router->getGlobalMiddlewares();
+
         foreach ($refClass->getMethods(ReflectionMethod::IS_PUBLIC) as $method) {
             foreach ($method->getAttributes(Route::class) as $attr) {
                 /** @var Route $route */
                 $route = $attr->newInstance();
-                // 控制器前缀
-                $prefix = '';
-                $controllerAttrs = $refClass->getAttributes(Controller::class);
-                if (!empty($controllerAttrs)) {
-                    /** @var Controller $controllerAttrs */
-                    $prefix = rtrim($controllerAttrs[0]->newInstance()->prefix, '/');
-                }
-                $path = $this->normalizePath(
-                    $prefix,
-                    $route->path
+                $path = $this->normalizePath($prefix, $route->path);
+                $methodMiddlewares = $this->collectMiddlewareNames(
+                    $method->getAttributes(Middleware::class)
                 );
-                $globalMiddlewares = $this->router->getGlobalMiddlewares();
-                // 类级 middleware
-                $classMiddlewares = $this->collectMiddlewareNames(
-                    $refClass->getAttributes(Middleware::class)
-                );
-                foreach ($route->methods as $httpMethod) {
-                    $methodMiddlewares = $this->collectMiddlewareNames(
-                        $method->getAttributes(Middleware::class)
-                    );
-                    $middlewares = array_merge($globalMiddlewares, $classMiddlewares, $methodMiddlewares,);
+                $middlewares = array_merge($globalMiddlewares, $classMiddlewares, $methodMiddlewares);
 
+                foreach ($route->methods as $httpMethod) {
                     $this->router->add(
                         $httpMethod,
                         $path,
@@ -85,166 +87,94 @@ class ControllerScanner
 
     private function executeWithMiddleware(array $middlewares, callable $handler)
     {
-        $result = $exception = null;
-        $instances = array_map(
-            fn($name) => $this->middlewareRegistry->resolve($name),
-            $middlewares
-        );
         $request = $this->container->get(Request::class);
+        /** @var MiddlewareInterface[] $instances 只包含 before() 已执行过的中间件 */
+        $instances = [];
+        $result = null;
+        $exception = null;
+
         try {
-            foreach ($instances as $m) {
-                $m->before($request);
+            foreach ($middlewares as $name) {
+                $middleware = $this->middlewareRegistry->resolve($name);
+                $instances[] = $middleware;
+                $middleware->before($request);
             }
 
             $result = $handler();
 
             if (!$result instanceof Response) {
-                $result = Response::text((string)$result);
+                if (is_array($result) || is_object($result)) {
+                    $result = Response::json((array)$result);
+                } elseif ($result === null) {
+                    $result = Response::text('');
+                } else {
+                    $result = Response::text((string)$result);
+                }
             }
-        }catch (\Throwable $e){
+        } catch (\Throwable $e) {
             $exception = $e;
             throw $e;
         } finally {
-            foreach (array_reverse($instances) as $m) {
-                $result = $m->after($result,$exception);
+            foreach (array_reverse($instances) as $middleware) {
+                $after = $middleware->after($result, $exception);
+                // 约定返回 null 表示中间件不改写响应
+                if ($after !== null) {
+                    $result = $after;
+                }
             }
         }
-
 
         return $result;
     }
 
     private function resolveArguments(
-        \ReflectionMethod $method,
-        array             $pathParams
+        ReflectionMethod $method,
+        array            $pathParams
     ): array
     {
         $args = [];
-
-        // 解析 body（只解析一次）
-        $rawBody = file_get_contents('php://input');
-        $bodyData = json_decode($rawBody, true) ?? [];
-
-        $headers = getallheaders();
+        $request = $this->container->get(Request::class);
+        $bodyData = $request->all();
+        $headers = $request->headers();
         $cookies = $_COOKIE;
 
         foreach ($method->getParameters() as $param) {
             $name = $param->getName();
+            $typeName = $this->typeName($param);
 
-            // 路径参数
-            if (isset($pathParams[$name])) {
+            // 1. 路径参数
+            if (array_key_exists($name, $pathParams)) {
                 $args[] = $this->castType($pathParams[$name], $param);
                 continue;
             }
 
-            if ($param->getType()
-                && (string)$param->getType() === Request::class
-            ) {
-                $args[] = $this->container->get(Request::class);
+            // 2. Request 注入
+            if ($typeName === Request::class) {
+                $args[] = $request;
                 continue;
             }
 
-            // FromQuery
-            $queryAttr = $param->getAttributes(FromQuery::class)[0] ?? null;
-            if ($queryAttr) {
-                $key = $queryAttr->newInstance()->name ?? $name;
-                $value = $_GET[$key] ?? null;
-
-                if ($value !== null) {
-                    $args[] = $this->castType($value, $param);
-                    continue;
-                }
+            // 3. 显式取参注解
+            if ($this->resolveAnnotatedParameter($param, $args, $bodyData, $headers, $cookies)) {
+                continue;
             }
 
-            // FromBody
-            $bodyAttr = $param->getAttributes(FromBody::class)[0] ?? null;
-            if ($bodyAttr) {
-                $key = $bodyAttr->newInstance()->name ?? $name;
-                $value = $bodyData[$key] ?? null;
-
-                if ($value !== null) {
-                    $args[] = $this->castType($value, $param);
-                    continue;
-                }
-            }
-
-            // FromHeader
-            $headerAttr = $param->getAttributes(FromHeader::class)[0] ?? null;
-            if ($headerAttr) {
-                $key = $headerAttr->newInstance()->name ?? $name;
-                $value = $headers[$key] ?? null;
-
-                if ($value !== null) {
-                    $args[] = $this->castType($value, $param);
-                    continue;
-                }
-            }
-
-            // FromCookie
-            $cookieAttr = $param->getAttributes(FromCookie::class)[0] ?? null;
-            if ($cookieAttr) {
-                $key = $cookieAttr->newInstance()->name ?? $name;
-                $value = $cookies[$key] ?? null;
-
-                if ($value !== null) {
-                    $args[] = $this->castType($value, $param);
-                    continue;
-                }
-            }
-
-            // FromEach
-            $eachAttr = $param->getAttributes(FromEach::class)[0] ?? null;
-            if ($eachAttr) {
-                $key = $eachAttr->newInstance()->name ?? $name;
-                $dtoClass = $eachAttr->newInstance()->dto;
-                file_put_contents('debug.log',json_encode($dtoClass).PHP_EOL,FILE_APPEND);
-                $value = $bodyData[$key] ?? null;
-                if (class_exists($dtoClass)
-                    && is_subclass_of($dtoClass, BaseDto::class)
-                    && $value !== null) {
-                    $group = 'default';
-                    $attrs = $param->getAttributes(ValidateGroup::class);
-                    if ($attrs) {
-                        $group = $attrs[0]->newInstance()->group;
-                    }
-                    $refDtoClass = new ReflectionClass($dtoClass);
-                    $each = [];
-                    
-                    foreach ($value as $item){
-                        $each[] = $dto = $this->container
-                            ->get(DtoResolver::class)
-                            ->resolve($dtoClass,$item);
-                        $attrs = $refDtoClass->getAttributes(ValidateGroup::class);
-                        if ($attrs) {
-                            $group = $attrs[0]->newInstance()->group;
-                        }
-                        file_put_contents('debug.log',json_encode($group).PHP_EOL,FILE_APPEND);
-                        file_put_contents('debug.log',json_encode($dto).PHP_EOL,FILE_APPEND);
-                        $this->container->get(Validator::class)->validate($dto, $group);
-                    }
-                    $args[] = $this->castType($value, $param);
-                    continue;
-                }
-            }
-
-            // DTO 自动注入
-            if ($param->getType()
-                && class_exists($type = (string)$param->getType())
-                && is_subclass_of($type, BaseDto::class)
+            // 4. DTO 自动注入
+            if ($typeName !== null
+                && class_exists($typeName)
+                && is_subclass_of($typeName, BaseDto::class)
             ) {
-                $group = 'default';
-                $attrs = $param->getAttributes(ValidateGroup::class);
-                if ($attrs) {
-                    $group = $attrs[0]->newInstance()->group;
-                }
-                $args[] = $dto = $this->container
+                $dto = $this->container
                     ->get(DtoResolver::class)
-                    ->resolve($type);
-                $this->container->get(Validator::class)->validate($dto, $group);
+                    ->resolve($typeName);
+                $this->container
+                    ->get(Validator::class)
+                    ->validate($dto, $this->resolveGroup($param));
+                $args[] = $dto;
                 continue;
             }
 
-            // 默认值
+            // 5. 默认值
             if ($param->isDefaultValueAvailable()) {
                 $args[] = $param->getDefaultValue();
                 continue;
@@ -256,19 +186,121 @@ class ControllerScanner
         return $args;
     }
 
-    private function castType($value, \ReflectionParameter $param)
+    /**
+     * 处理 FromQuery / FromBody / FromHeader / FromCookie / FromEach。
+     * 已消费该参数时返回 true。
+     */
+    private function resolveAnnotatedParameter(
+        ReflectionParameter $param,
+        array               &$args,
+        array               $bodyData,
+        array               $headers,
+        array               $cookies
+    ): bool
+    {
+        $name = $param->getName();
+
+        $sources = [
+            FromQuery::class  => fn(string $key) => $_GET[$key] ?? null,
+            FromBody::class   => fn(string $key) => $bodyData[$key] ?? null,
+            FromHeader::class => fn(string $key) => $headers[strtolower($key)] ?? null,
+            FromCookie::class => fn(string $key) => $cookies[$key] ?? null,
+        ];
+
+        foreach ($sources as $attributeClass => $read) {
+            $attr = $param->getAttributes($attributeClass)[0] ?? null;
+            if ($attr === null) {
+                continue;
+            }
+
+            $key = $attr->newInstance()->name ?? $name;
+            $value = $read($key);
+
+            if ($value !== null) {
+                $args[] = $this->castType($value, $param);
+                return true;
+            }
+            // 该参数声明了取值来源但没取到，交给后续默认值分支，不再尝试其它来源
+            return false;
+        }
+
+        // FromEach：请求体中的数组 -> DTO 数组（逐项校验）
+        $eachAttr = $param->getAttributes(FromEach::class)[0] ?? null;
+        if ($eachAttr !== null) {
+            $args[] = $this->resolveDtoList($param, $eachAttr->newInstance(), $bodyData);
+            return true;
+        }
+
+        return false;
+    }
+
+    private function resolveDtoList(
+        ReflectionParameter $param,
+        object              $each,
+        array               $bodyData
+    ): array
+    {
+        $name = $param->getName();
+        $key = $each->name ?? $name;
+        $dtoClass = $each->dto;
+
+        if ($dtoClass === null) {
+            throw new \RuntimeException("FromEach on \${$name} requires a dto class");
+        }
+        if (!class_exists($dtoClass) || !is_subclass_of($dtoClass, BaseDto::class)) {
+            throw new \RuntimeException(
+                "FromEach dto {$dtoClass} must extend " . BaseDto::class
+            );
+        }
+
+        $raw = $bodyData[$key] ?? null;
+        if (!is_array($raw)) {
+            throw new BadRequestException("\${$name} must be an array");
+        }
+
+        $group = $this->resolveGroup($param);
+        $resolver = $this->container->get(DtoResolver::class);
+        $validator = $this->container->get(Validator::class);
+
+        $items = [];
+        foreach ($raw as $index => $item) {
+            if (!is_array($item)) {
+                throw new BadRequestException("\${$name}[{$index}] must be an object");
+            }
+            // 显式传入 item，避免嵌套字段回落到全局 body
+            $dto = $resolver->resolve($dtoClass, $item);
+            $validator->validate($dto, $group);
+            $items[] = $dto;
+        }
+
+        return $items;
+    }
+
+    private function resolveGroup(ReflectionParameter $param): string
+    {
+        $attrs = $param->getAttributes(ValidateGroup::class);
+        return $attrs ? $attrs[0]->newInstance()->group : 'default';
+    }
+
+    private function typeName(ReflectionParameter $param): ?string
+    {
+        $type = $param->getType();
+        return $type instanceof ReflectionNamedType ? $type->getName() : null;
+    }
+
+    private function castType($value, ReflectionParameter $param)
     {
         $type = $param->getType();
 
-        if (!$type) {
+        if (!$type instanceof ReflectionNamedType) {
             return $value;
         }
 
-        return match ((string)$type) {
+        return match ($type->getName()) {
             'int' => (int)$value,
             'float' => (float)$value,
-            'bool' => (bool)$value,
-            'string' => (string)$value,
+            'bool' => filter_var($value, FILTER_VALIDATE_BOOLEAN),
+            'string' => is_scalar($value) ? (string)$value : $value,
             default => $value,
         };
     }

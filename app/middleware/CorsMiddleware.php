@@ -2,37 +2,105 @@
 
 namespace app\middleware;
 
+use phpet\core\middleware\MiddlewareInterface;
 use phpet\core\Request;
 use phpet\core\Response;
 
-class CorsMiddleware implements \phpet\core\middleware\MiddlewareInterface
+/**
+ * 跨域中间件。
+ *
+ * 注意：Access-Control-Allow-Origin 与 Access-Control-Allow-Credentials 不能
+ * 同时用通配符。需要携带 Cookie 时，把 $origins 配成具体域名并开启 credentials，
+ * 中间件会自动回显请求的 Origin。
+ */
+class CorsMiddleware implements MiddlewareInterface
 {
-    private array $headers = [
-        'Access-Control-Allow-Origin' => '*',
-        'Access-Control-Allow-Methods' => 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers' => 'Content-Type, Authorization',
-        'Access-Control-Allow-Credentials' => 'true',
-        'Access-Control-Max-Age' => '86400',
-    ];
+    private ?string $origin = null;
+
+    public function __construct(
+        private array $origins = ['*'],
+        private bool  $credentials = false,
+        private array $methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+        private array $headers = ['Content-Type', 'Authorization', 'X-Request-Id'],
+        private int   $maxAge = 86400,
+    ) {
+    }
 
     public function before(?Request $request)
     {
-        // 预检请求直接返回
-        if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-            foreach ($this->headers as $k => $v) {
-                header("$k: $v");
-            }
+        $this->origin = $request?->header('origin');
 
+        // 预检请求直接返回
+        $method = $request?->method() ?? ($_SERVER['REQUEST_METHOD'] ?? 'GET');
+        if ($method === 'OPTIONS') {
+            foreach ($this->buildHeaders() as $k => $v) {
+                header("{$k}: {$v}");
+            }
             http_response_code(204);
             exit;
         }
     }
 
-    public function after(?Response $response, ?\Throwable $exception=null)
+    public function after(?Response $response, ?\Throwable $exception = null)
     {
-        foreach ($this->headers as $k => $v) {
-            header("$k: $v");
+        $headers = $this->buildHeaders();
+
+        if ($response instanceof Response) {
+            foreach ($headers as $k => $v) {
+                $response->header($k, $v);
+            }
+            return $response;
+        }
+
+        foreach ($headers as $k => $v) {
+            header("{$k}: {$v}");
         }
         return $response;
+    }
+
+    private function buildHeaders(): array
+    {
+        $headers = [];
+        $allowOrigin = $this->resolveAllowOrigin();
+
+        if ($allowOrigin !== null) {
+            $headers['Access-Control-Allow-Origin'] = $allowOrigin;
+            if ($allowOrigin !== '*') {
+                $headers['Vary'] = 'Origin';
+            }
+            if ($this->credentials) {
+                $headers['Access-Control-Allow-Credentials'] = 'true';
+            }
+        }
+
+        $headers['Access-Control-Allow-Methods'] = implode(', ', $this->methods);
+        $headers['Access-Control-Allow-Headers'] = implode(', ', $this->headers);
+        $headers['Access-Control-Max-Age'] = (string)$this->maxAge;
+
+        return $headers;
+    }
+
+    /**
+     * 返回 null 表示不输出 CORS 来源头。
+     * credentials 为 true 时绝不使用通配符，改为回显具体 Origin。
+     */
+    private function resolveAllowOrigin(): ?string
+    {
+        $wildcard = in_array('*', $this->origins, true);
+
+        if ($wildcard && !$this->credentials) {
+            return '*';
+        }
+
+        $origin = $this->origin;
+        if ($origin === null) {
+            return null;
+        }
+
+        if ($wildcard || in_array($origin, $this->origins, true)) {
+            return $origin;
+        }
+
+        return null;
     }
 }

@@ -8,8 +8,8 @@ use Attribute;
 class Range
 {
     public function __construct(
-        public int $min,
-        public int $max,
+        public int|float $min = 0,
+        public int|float $max = PHP_INT_MAX,
         public array $groups = ['default'],
     ) {}
 }
