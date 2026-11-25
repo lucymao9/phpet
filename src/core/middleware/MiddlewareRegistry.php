@@ -12,9 +12,23 @@ class MiddlewareRegistry
 
     /**
      * 注册中间件，params 会在实例化时作为构造参数传入。
+     *
+     * 类名与接口在注册时就校验，避免写错后要等到首次请求才暴露。
      */
     public function register(string $name, string $class, array $params = []): void
     {
+        if (!class_exists($class)) {
+            throw new \RuntimeException(
+                "Middleware {$name} class not found: {$class}"
+            );
+        }
+
+        if (!is_subclass_of($class, MiddlewareInterface::class)) {
+            throw new \RuntimeException(
+                "Middleware {$name} must implement " . MiddlewareInterface::class
+            );
+        }
+
         $this->map[$name] = ['class' => $class, 'params' => $params];
     }
 
@@ -44,6 +58,7 @@ class MiddlewareRegistry
         $config = $this->map[$name];
         $instance = new $config['class'](...$config['params']);
 
+        // register() 已校验过接口，这里只是兜底
         if (!$instance instanceof MiddlewareInterface) {
             throw new \RuntimeException(
                 "Middleware {$name} must implement " . MiddlewareInterface::class

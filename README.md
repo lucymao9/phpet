@@ -401,7 +401,7 @@ $registry->register('cors', CorsMiddleware::class, [['https://a.com'], true]); /
 $registry->registerInstance('auth', new AuthMiddleware());              // 直接给实例
 ```
 
-接口校验发生在**首次 `resolve()`** 而非 `register()` 当场——类名写错不会在注册时报错，而是在第一次用到该中间件时抛 `RuntimeException`。
+`register()` 会当场校验：类必须存在，且必须实现 `MiddlewareInterface`，否则立刻抛 `RuntimeException`。类名拼错在启动时就暴露，不会拖到第一次请求。
 
 ### 绑定
 
