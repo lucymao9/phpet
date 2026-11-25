@@ -401,7 +401,7 @@ $registry->register('cors', CorsMiddleware::class, [['https://a.com'], true]); /
 $registry->registerInstance('auth', new AuthMiddleware());              // 直接给实例
 ```
 
-`register()` 会当场校验：类必须存在，且必须实现 `MiddlewareInterface`，否则立刻抛 `RuntimeException`。类名拼错在启动时就暴露，不会拖到第一次请求。
+`register()` 会当场校验三件事：类存在、实现了 `MiddlewareInterface`、并且可实例化（抽象类会被拒），任一不满足立刻抛 `RuntimeException`。类名拼错或漏写接口在启动时就暴露，不会拖到第一次请求。
 
 ### 绑定
 

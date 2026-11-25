@@ -13,11 +13,12 @@ class MiddlewareRegistry
     /**
      * 注册中间件，params 会在实例化时作为构造参数传入。
      *
-     * 类名与接口在注册时就校验，避免写错后要等到首次请求才暴露。
+     * 类名、接口与可实例化性都在注册时校验，避免写错后要等到首次请求才暴露。
      */
     public function register(string $name, string $class, array $params = []): void
     {
-        if (!class_exists($class)) {
+        // class_exists() 对接口返回 false，需单独判断，否则报错信息会误导成"类不存在"
+        if (!class_exists($class) && !interface_exists($class)) {
             throw new \RuntimeException(
                 "Middleware {$name} class not found: {$class}"
             );
@@ -26,6 +27,13 @@ class MiddlewareRegistry
         if (!is_subclass_of($class, MiddlewareInterface::class)) {
             throw new \RuntimeException(
                 "Middleware {$name} must implement " . MiddlewareInterface::class
+            );
+        }
+
+        // 抽象类也能通过 is_subclass_of，但 new 不出来
+        if (!(new \ReflectionClass($class))->isInstantiable()) {
+            throw new \RuntimeException(
+                "Middleware {$name} must be instantiable (not abstract): {$class}"
             );
         }
 
