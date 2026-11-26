@@ -2,7 +2,7 @@
 
 用 PHP 8 属性（Attribute）声明路由、取参与校验的极简 MVC 框架。零第三方运行时依赖。
 
-**当前版本**：v0.1.0
+**当前版本**：v0.2.0（相对 v0.1.0 新增控制台、数据库、缓存三层）
 
 **环境要求**：PHP >= 8.1（在 8.5.3 上验证）、ext-mbstring、ext-json、ext-filter
 
@@ -41,7 +41,7 @@ cd my-app
 php -S 127.0.0.1:8000 -t public public/index.php
 ```
 
-还没发布到 Packagist 时，直接从 VCS 仓库拉（会取最新的稳定标签，当前 `v0.1.0`）：
+还没发布到 Packagist 时，直接从 VCS 仓库拉（会取最新的稳定标签，当前 `v0.2.0`）：
 
 ```bash
 composer create-project \
