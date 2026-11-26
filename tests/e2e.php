@@ -374,8 +374,11 @@ try {
     });
 
     test('路由缓存生效后接口行为不变', function () {
-        // 首次请求已经写过缓存（APP_DEBUG=0），再打一轮验证命中缓存路径
-        assertFileExists(PHPET_ROOT . '/runtime/cache/routes.php');
+        // 首次请求已经写过缓存（APP_DEBUG=0），再打一轮验证命中缓存路径。
+        // 路由表现在是通用缓存里的一个键，文件名是键的 sha256。
+        $routeFile = PHPET_ROOT . '/runtime/cache/store/'
+            . hash('sha256', \phpet\core\RouteCache::DEFAULT_KEY) . '.cache';
+        assertFileExists($routeFile);
 
         $response = http('GET', '/api/user/7');
 

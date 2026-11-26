@@ -19,7 +19,7 @@ use phpet\core\Application;
  */
 class Console
 {
-    public const VERSION = '0.3.0';
+    public const VERSION = '0.3.1';
 
     /** @var array<string, Command> */
     private array $commands = [];

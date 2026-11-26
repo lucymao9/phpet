@@ -2,7 +2,7 @@
 
 用 PHP 8 属性（Attribute）声明路由、取参与校验的极简 MVC 框架。零第三方运行时依赖。
 
-**当前版本**：v0.3.0（相对 v0.2.0：路由缓存收敛到 `CacheInterface`，移除 `cachePath` 选项）
+**当前版本**：v0.3.1（相对 v0.3.0：修正端到端测试对旧缓存文件路径的断言）
 
 **环境要求**：PHP >= 8.1（在 8.5.3 上验证）、ext-mbstring、ext-json、ext-filter
 
