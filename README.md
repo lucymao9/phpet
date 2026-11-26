@@ -20,8 +20,12 @@
 - **中间件** —— `before` 正序 / `after` 逆序，支持短路与异常透传
 - **内容协商** —— 同一套异常处理，浏览器拿 HTML 错误页，API 拿 JSON
 - **分级日志** —— debug / info / warning / error，落盘在 web 根之外
-- **即开即用** —— 装配收敛到 `Application` 一个类，入口 20 行；`composer create-project` 或 clone 下来直接能跑
-- **自带测试套件** —— 零依赖 runner，201 个单元用例 + 20 个真实 HTTP 端到端用例
+- **命令行** —— `bin/console` 与 web 共用一份配置，`route:list` / 迁移 / 清缓存开箱可用
+- **数据库** —— PDO 连接池管理、查询构造器、事务（含嵌套 savepoint）、迁移，**不带 ORM**
+- **缓存** —— PSR-16 同签名契约 + 文件驱动，键校验与原子写
+- **即开即用** —— 装配收敛到 `Application` 一个类，入口 9 行；`composer create-project` 或 clone 下来直接能跑
+- **仍无第三方运行时依赖** —— 数据库用 `PDO`，缓存用手写文件驱动，命令行自己解析参数
+- **自带测试套件** —— 零依赖 runner，299 个单元用例 + 20 个真实 HTTP 端到端用例
 
 ---
 
@@ -77,15 +81,25 @@ APP_DEBUG=1 php -S 127.0.0.1:8000 -t public public/index.php
 │   ├── controller/           # 控制器，启动时递归扫描
 │   ├── dto/                  # 数据传输对象，需继承 BaseDto
 │   └── middleware/           # 中间件
+├── bin/
+│   └── console               # 命令行入口，与 web 共用配置
 ├── bootstrap/
 │   └── autoload.php          # 自动加载入口（composer 优先，无则可退回内置 PSR-4）
+├── config/
+│   └── app.php               # web 与控制台共用的配置
+├── database/
+│   ├── migrations/           # 迁移文件，文件名即执行顺序
+│   └── phpet.sqlite          # 默认 sqlite 库（自动生成，已 gitignore）
 ├── public/
-│   └── index.php             # 唯一入口，20 行
+│   └── index.php             # 唯一入口，9 行
 ├── src/                      # 框架代码（phpet\ 命名空间）
 │   ├── attribute/            # 注解定义
 │   │   ├── request/          # 取参注解
 │   │   └── validate/         # 校验注解
-│   └── core/                 # Application、容器、路由、请求响应、校验、日志
+│   ├── cache/                # 缓存契约与文件驱动
+│   ├── console/              # 控制台内核与内置命令
+│   ├── core/                 # Application、容器、路由、请求响应、校验、日志
+│   └── db/                   # 连接、查询构造器、迁移器
 ├── runtime/
 │   ├── cache/                # 路由缓存（自动生成，可随时删除）
 │   └── logs/                 # 日志（web 根之外，已 gitignore）
@@ -97,17 +111,16 @@ APP_DEBUG=1 php -S 127.0.0.1:8000 -t public public/index.php
 └── vendor/                   # composer 产物（可选）
 ```
 
-`public/index.php` 的全部内容（略去 `use` 与注释）：
+`public/index.php` 的全部内容（略去 `use`）：
 
 ```php
 require dirname(__DIR__) . '/bootstrap/autoload.php';
 
-(new Application([
-    'basePath'          => dirname(__DIR__),
-    'middlewares'       => ['auth' => AuthMiddleware::class, 'log' => LogMiddleware::class],
-    'globalMiddlewares' => ['cors'],
-]))->run();
+// 配置在 config/app.php，与 bin/console 共用同一份
+(new Application(require dirname(__DIR__) . '/config/app.php'))->run();
 ```
+
+中间件、数据库这些都在 `config/app.php` 里，入口只做一件事：读配置、跑起来。
 
 `Application` 负责读配置、建容器、注册中间件、扫控制器、查路由、发响应，`run()` 只是「`Request::fromGlobals()` → `handle()` → `send()`」。
 
@@ -231,6 +244,211 @@ return array(
 | 签名计算 + 读缓存注册 | 3.33 ms |
 
 约 3 倍提升，节省约 6.7 ms/请求。规模小时绝对值不大，但缓存路径还额外避免了启动阶段加载全部控制器类——控制器的构造逻辑（连数据库、读配置）不会为无关请求执行。
+
+---
+
+## 控制台
+
+`bin/console` 是唯一的命令行入口，与 web 共用 `config/app.php`——改一处，两边都生效。
+
+```bash
+php bin/console                       # 不带参数等于 list
+php bin/console list
+php bin/console route:list
+php bin/console --version
+php bin/console help db:rollback
+```
+
+| 命令 | 作用 |
+| --- | --- |
+| `list` | 列出全部命令 |
+| `route:list` | 列出已注册路由（带控制器与动作名） |
+| `make:migration <name>` | 生成迁移文件骨架 |
+| `db:migrate` | 执行待执行迁移 |
+| `db:rollback [--steps=1]` | 按批次回滚 |
+| `db:status` | 查看迁移状态 |
+| `cache:clear [--expired]` | 清空通用缓存 / 只删过期项 |
+
+`route:list` 走的是与线上请求**完全相同**的装配流程（含路由缓存），所以列出来的就是真实生效的那张表，而不是「理论上注册的」。每个路径的 `OPTIONS` 占位路由由框架自动补，默认不显示，加 `--all` 才列：
+
+```
+Method  Path             Handler
+GET     /api/users       UserController::index
+GET     /api/user/{id}   UserController::show
+```
+
+### 写一个命令
+
+```php
+namespace app\console;
+
+use phpet\console\Command;
+use phpet\console\Input;
+use phpet\console\Output;
+
+class HelloCommand extends Command
+{
+    public function name(): string
+    {
+        return 'hello';
+    }
+
+    public function description(): string
+    {
+        return 'Say hello';
+    }
+
+    public function usage(): string
+    {
+        return 'console hello [name]';
+    }
+
+    public function run(Input $input, Output $output): int
+    {
+        $output->success('Hello, ' . $input->argument(0, 'world'));
+
+        return 0;   // 0 成功，1 失败，2 用法错误
+    }
+}
+```
+
+在 `Console` 构造里 `add(new HelloCommand())` 即生效。
+
+选项约定：`--name=value` 带值，`--name` 是布尔开关，`--` 之后全部按位置参数处理。`--name value` 这种空格分隔写法**不支持**——省掉这条歧义，解析器就不需要知道哪个选项吃参数、哪个不吃。
+
+`Output` 提供 `success` / `error` / `warn` / `info` / `title` / `table`。颜色按 TTY 自动开关，`--no-color` 或 `NO_COLOR` 环境变量可强制关闭，CI 日志里不会出现转义序列。
+
+---
+
+## 数据库
+
+零第三方依赖：直接用 `PDO`。配置在 `config/app.php` 的 `db` 段，默认 sqlite，不需要起任何服务：
+
+```php
+'db' => [
+    'driver'   => getenv('DB_DRIVER') ?: 'sqlite',
+    'database' => getenv('DB_DATABASE') ?: $root . '/database/phpet.sqlite',
+    'host'     => getenv('DB_HOST') ?: '127.0.0.1',
+    'port'     => (int)(getenv('DB_PORT') ?: 3306),
+    'username' => getenv('DB_USERNAME') ?: 'root',
+    'password' => getenv('DB_PASSWORD') ?: '',
+    'charset'  => getenv('DB_CHARSET') ?: 'utf8mb4',
+],
+```
+
+换 MySQL 就是设环境变量：`DB_DRIVER=mysql DB_DATABASE=app php bin/console db:migrate`。
+
+连接是**惰性**的：不碰数据库的请求不会连库，所以「没配数据库也能跑起来」这件事是成立的。
+
+### 查询构造器
+
+```php
+use phpet\db\Connection;
+
+$db = $app->connection();   // 或在控制器里按类型注入 Connection
+
+$db->table('users')->where('city', 'SH')->orderBy('id', 'desc')->limit(10)->get();
+$db->table('users')->find(3);
+$db->table('users')->where('age', '>', 18)->whereIn('city', ['SH', 'BJ'])->count();
+$db->table('users')->insert(['name' => 'alice', 'city' => 'SH']);
+$db->table('users')->where('id', 3)->update(['name' => 'bob']);
+$db->table('users')->where('id', 3)->delete();
+```
+
+方法：`select` / `where` / `orWhere` / `whereIn` / `whereNotIn` / `whereNull` / `whereBetween` / `whereLike` / `whereRaw` / `whereGroup` / `join` / `leftJoin` / `groupBy` / `having` / `orderBy` / `limit` / `offset` / `get` / `first` / `find` / `value` / `pluck` / `count` / `exists` / `chunk` / `insert` / `insertGetId` / `update` / `delete` / `increment` / `decrement`。
+
+几个约定：
+
+- 值一律走参数绑定；**标识符不绑定**，所以表名、字段名不要直接拼用户输入
+- 操作符有白名单，写错抛异常而不是拼进 SQL
+- `whereIn` 传空数组生成 `1 = 0`，不会拼出 `in ()`
+- `where('x', null)` 自动变成 `is null`，`where('x', '!=', null)` 变成 `is not null`
+- `where('x')` 单参写法直接报错，提示改用 `whereNull`
+- 需要括号分组时用 `whereGroup(function ($q) { ... })`
+- 标识符用反引号包裹，支持 MySQL 与 SQLite；PostgreSQL 的引号规则不同，暂不支持
+
+### 事务
+
+```php
+$db->transaction(function (Connection $db) {
+    $db->table('accounts')->where('id', 1)->decrement('balance', 100);
+    $db->table('accounts')->where('id', 2)->increment('balance', 100);
+});
+```
+
+回调抛异常就整体回滚，并把原异常透传出去。嵌套调用用 `SAVEPOINT`：内层失败只回滚内层，外层已写的数据不受影响。
+
+### 迁移
+
+```bash
+php bin/console make:migration create_users
+```
+
+生成 `database/migrations/2026_11_26_120000_create_users.php`，内容是返回匿名类的文件：
+
+```php
+return new class extends Migration {
+    public function up(Connection $db): void
+    {
+        $db->execute('create table users (id integer primary key, name text not null)');
+    }
+
+    public function down(Connection $db): void
+    {
+        $db->execute('drop table users');
+    }
+};
+```
+
+```bash
+php bin/console db:migrate              # 执行待执行的全部迁移
+php bin/console db:status               # 看哪些执行了、在第几批
+php bin/console db:rollback             # 回滚最后一批
+php bin/console db:rollback --steps=2   # 回滚最近两批
+```
+
+几点需要知道：
+
+- 执行顺序**完全**由文件名决定，所以名字必须带时间戳
+- 回滚按**批次**而不是按单个迁移；同一批里的多条会一起回滚
+- 没有 Schema 构造器，DDL 直接写 SQL。方言差异比查询大得多，造一个只覆盖简单场景的构造器比不造更糟
+- 单个迁移**不包事务**：MySQL 的 DDL 是隐式提交的，包了也只是错觉。需要原子性请在 `up()` 里自己判断并补偿
+
+### 为什么不带 ORM
+
+phpet 不提供模型、关系映射、预加载。这不是「还没做」，是「不做」：半成品 ORM 会被拿去和 Eloquent / Doctrine 比然后输，而 PDO + 查询构造器 + 迁移是工具，不是世界观。
+
+需要 ORM 就装 Doctrine，在容器里 bind 一下即可，框架不拦着：
+
+```php
+$container->bind(EntityManagerInterface::class, fn() => $em);
+```
+
+---
+
+## 缓存
+
+```php
+$cache = $app->cache();   // 文件驱动，目录 runtime/cache/store
+
+$cache->set('user.1', $user, 600);   // 600 秒
+$cache->get('user.1', null);
+$cache->has('user.1');
+$cache->delete('user.1');
+$cache->clear();
+```
+
+`CacheInterface` 的方法签名与 **PSR-16** 一致，只是不引入 `psr/simple-cache` 这个包——框架承诺零第三方运行时依赖。需要和其他库互操作时，写一个十行的适配器实现 `Psr\SimpleCache\CacheInterface` 转发到本接口即可，不用改框架。
+
+几点说明：
+
+- 键不能含 `{ } ( ) / \ @ :`，这是 PSR-16 的保留字符。用 `user.1`，不要用 `user:1`——提前挡住，换驱动时才不会出现「文件驱动能跑、Redis 报错」
+- 值是 `serialize()` 存的，对象、`false`、`null` 都能原样取回；存 `false` 时 `get()` 不会退回默认值
+- 写入走「临时文件 + rename」，`rename` 在同一文件系统上是原子的，并发下不会读到半截文件
+- TTL 非正数视为立刻过期；`DateInterval` 也接受
+- 过期文件按读时惰性删除。长期没人读的键会滞留，用 `php bin/console cache:clear --expired` 或 `FileCache::prune()` 定期清理
+
+注意区分两个「缓存」：`cachePath` 是**路由表**的缓存文件，`cacheDir` 是**通用缓存**目录，互不相干。
 
 ---
 
@@ -630,6 +848,9 @@ $repo = $container->get(UserRepositoryInterface::class);
 | `globalMiddlewares` | `[]` | 包在路由外层的中间件名，404 / 405 也会经过 |
 | `exceptionHandler` | 按 `debug` 自动创建 | 可换成自定义实现 |
 | `container` | 新建 | 传入已装配的容器 |
+| `db` | `[]` | 数据库配置，见「数据库」一节 |
+| `migrations` | `{basePath}/database/migrations` | 迁移文件目录 |
+| `cacheDir` | `{basePath}/runtime/cache/store` | 通用缓存目录（与路由缓存 `cachePath` 无关） |
 
 路径全部从 `basePath` 推导、不依赖框架自身安装位置，所以整套代码放进 `vendor/` 也能正常工作。
 
@@ -674,7 +895,7 @@ Logger::error('db down', ['trace' => $e->getTraceAsString()]);
 不依赖 PHPUnit，零第三方依赖，clone 下来直接能跑：
 
 ```bash
-php tests/run.php                # 单元 + 集成：201 个用例
+php tests/run.php                # 单元 + 集成：299 个用例
 php tests/run.php router         # 只跑名称或文件名含 "router" 的用例
 php tests/run.php --no-color     # 关掉颜色
 php tests/e2e.php                # 端到端：起 php -S 打真实 HTTP
@@ -709,6 +930,11 @@ php tests/e2e.php                # 端到端：起 php -S 打真实 HTTP
 | `10_error_handler.php` | JSON / HTML 分支、debug 才透出细节、HTML 转义、`wantsHtml()` 矩阵 |
 | `11_logger.php` | 落盘格式、级别过滤、目录不可写时退回 `error_log()` |
 | `12_application.php` | 路径从 `basePath` 推导、未知配置项报错、`handle()` 不经 SAPI、中间件装配顺序、缓存命中 |
+| `13_console.php` | 参数解析、表格对齐、退出码、未知命令建议、`route:list` 隐藏 OPTIONS、`make:migration` 生成内容 |
+| `14_db.php` | DSN 拼装、惰性连接、参数绑定防注入、类型往返、事务提交/回滚/嵌套 savepoint |
+| `15_query_builder.php` | SQL 生成（括号、空 `in`、`is null`、别名、`having`）+ 真实 sqlite 执行 |
+| `16_migrator.php` | 按文件名排序、批次记录、按批次回滚、`down` 真实执行、坏文件报错 |
+| `17_cache.php` | 值/对象/`false` 往返、TTL、`prune`、键校验、原子写、损坏文件自愈 |
 | `e2e.php` | 真实请求下的 `$_SERVER` / `php://input` 解析、响应头下发、HEAD 空体、内容协商 |
 
 ### 写一个用例
@@ -777,6 +1003,9 @@ curl -s http://127.0.0.1:8000/nope -H 'Accept: text/html'
 - `#[Route]` 不可重复，一个方法只能有一个路径；多动词请用 `methods: []`
 - 内容协商按 `Accept` 里的**出现位置**判断，不解析 `q` 权重
 - 无 PSR-7 / PSR-15 兼容层，中间件签名是本框架自有约定
-- 未内置 ORM、模板引擎、i18n
+- **没有 ORM**：不提供模型、关系映射、预加载。要 ORM 请装 Doctrine 并在容器里 bind
+- **没有队列**：需要异步任务时，用 `db` 层加一张任务表和一个 worker 脚本即可；框架不封装，因为真正的队列要处理延迟、重试退避、死信、可见性超时，成本远高于它的收益
+- 查询构造器的标识符用反引号包裹，**PostgreSQL 不支持**（连接能连上，它要求双引号）
+- 未内置模板引擎、i18n
 - `composer.json` 同时把 `phpet\` 映射到 `src/`、`app\` 映射到 `app/`。作为**依赖包**安装时，`app\` 这条会与宿主项目自己的 `app\` 争抢；当前分发形态是骨架一体式（`composer create-project`），不存在该问题，将来拆成「框架包 + 骨架包」时需把 `app\` 映射移出框架包
 
