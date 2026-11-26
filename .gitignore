@@ -6,3 +6,5 @@
 CLAUDE.md
 *.code-workspace
 .idea/
+/database/*.sqlite
+/database/*.sqlite-journal

@@ -6,6 +6,9 @@ use phpet\core\Exception\ExceptionHandler;
 use phpet\core\Log\Logger;
 use phpet\core\middleware\MiddlewarePipeline;
 use phpet\core\middleware\MiddlewareRegistry;
+use phpet\cache\CacheInterface;
+use phpet\cache\FileCache;
+use phpet\db\Connection;
 
 /**
  * 应用内核：把「装配 + 分发 + 输出」从入口脚本里收拢到一处。
@@ -32,6 +35,9 @@ class Application
         'globalMiddlewares',
         'exceptionHandler',
         'container',
+        'db',
+        'migrations',
+        'cacheDir',
     ];
 
     private string $basePath;
@@ -53,6 +59,15 @@ class Application
     private ExceptionHandler $exceptionHandler;
     private Container $container;
 
+    /** @var array<string, mixed> 数据库配置，首次用到时才建连接 */
+    private array $dbConfig;
+
+    private string $migrationDir;
+    private string $cacheDir;
+
+    private ?CacheInterface $cache = null;
+
+    private ?Connection $connection = null;
     private ?Router $router = null;
     private ?MiddlewareRegistry $registry = null;
 
@@ -70,7 +85,10 @@ class Application
      *     middlewares?: array,
      *     globalMiddlewares?: string[],
      *     exceptionHandler?: ExceptionHandler,
-     *     container?: Container
+     *     container?: Container,
+     *     db?: array<string, mixed>,
+     *     migrations?: string,
+     *     cacheDir?: string
      * } $options
      */
     public function __construct(array $options = [])
@@ -113,6 +131,11 @@ class Application
         $this->exceptionHandler = $options['exceptionHandler']
             ?? new ExceptionHandler($this->debug);
         $this->container = $options['container'] ?? new Container();
+        $this->dbConfig = (array)($options['db'] ?? []);
+        $this->migrationDir = $options['migrations']
+            ?? $this->basePath . '/database/migrations';
+        $this->cacheDir = $options['cacheDir']
+            ?? $this->basePath . '/runtime/cache/store';
     }
 
     /**
@@ -179,19 +202,77 @@ class Application
         return $this->router;
     }
 
+    /**
+     * 数据库连接（惰性创建，首次调用时才连）。
+     *
+     * 建好后注册进容器，控制器可以直接按类型注入 Connection。
+     */
+    public function connection(): Connection
+    {
+        if ($this->connection === null) {
+            $this->connection = Connection::fromConfig($this->dbConfig);
+            $this->container->singleton(Connection::class, $this->connection);
+        }
+
+        return $this->connection;
+    }
+
     /* ------------------------------------------------------------------ */
 
-    private function boot(Request $request): void
+    public function migrationPath(): string
+    {
+        return $this->migrationDir;
+    }
+
+    /**
+     * 运行时默认值：时区与日志。
+     *
+     * web 在 boot() 里调，控制台在启动时调一次——否则命令里写的日期
+     * 会用 php.ini 的默认时区，和线上差好几个小时。
+     */
+    public function applyRuntimeDefaults(): void
+    {
+        date_default_timezone_set($this->timezone);
+        Logger::init($this->logDir, $this->logLevel);
+    }
+
+    public function cacheDir(): string
+    {
+        return $this->cacheDir;
+    }
+
+    /**
+     * 通用缓存（默认文件驱动），首次调用时创建并注册进容器。
+     */
+    public function cache(): CacheInterface
+    {
+        if ($this->cache === null) {
+            $this->cache = new FileCache($this->cacheDir);
+            $this->container->singleton(CacheInterface::class, $this->cache);
+            $this->container->singleton(FileCache::class, $this->cache);
+        }
+
+        return $this->cache;
+    }
+
+    /**
+     * 完成装配（时区、日志、中间件注册表、路由表）。
+     *
+     * 传入 $request 时会把它注册为容器里的单例；控制台命令没有请求，
+     * 传 null 即可，此时只是把路由表建起来（例如 route:list）。
+     */
+    public function boot(?Request $request = null): void
     {
         // 每次请求都覆盖 Request 单例，让控制器注入到的总是当次请求
-        $this->container->singleton(Request::class, $request);
+        if ($request !== null) {
+            $this->container->singleton(Request::class, $request);
+        }
 
         if ($this->router !== null) {
             return;
         }
 
-        date_default_timezone_set($this->timezone);
-        Logger::init($this->logDir, $this->logLevel);
+        $this->applyRuntimeDefaults();
 
         $registry = $this->buildRegistry();
         $router = new Router($this->exceptionHandler);

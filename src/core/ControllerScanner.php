@@ -169,7 +169,8 @@ class ControllerScanner
                         $action,
                         $middlewares,
                         $pathParams
-                    )
+                    ),
+                    ['controller' => $controller, 'action' => $action, 'middlewares' => $middlewares]
                 );
             }
 
@@ -181,7 +182,8 @@ class ControllerScanner
                 fn() => $this->executeWithMiddleware(
                     $middlewares,
                     fn() => (new Response())->status(204)
-                )
+                ),
+                ['controller' => $controller, 'action' => 'OPTIONS', 'generated' => true]
             );
         }
     }

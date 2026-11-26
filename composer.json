@@ -2,13 +2,19 @@
   "name": "phpet/phpet",
   "description": "用 PHP 属性声明路由、取参与校验的极简 MVC 框架，零第三方运行时依赖",
   "type": "project",
+  "bin": [
+    "bin/console"
+  ],
   "license": "MIT",
   "keywords": [
     "framework",
     "micro-framework",
     "router",
     "attributes",
-    "validation"
+    "validation",
+    "query-builder",
+    "console",
+    "cache"
   ],
   "require": {
     "php": ">=8.1",
@@ -25,5 +31,10 @@
   "scripts": {
     "test": "php tests/run.php",
     "test:e2e": "php tests/e2e.php"
+  },
+  "suggest": {
+    "ext-pdo_sqlite": "sqlite 驱动，零配置起库（默认）",
+    "ext-pdo_mysql": "MySQL 驱动",
+    "ext-redis": "将来接 Redis 缓存驱动"
   }
 }

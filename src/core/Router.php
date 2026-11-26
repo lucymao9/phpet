@@ -29,7 +29,10 @@ class Router
     {
     }
 
-    public function add(string $method, string $path, callable $handler): void
+    /**
+     * @param array<string, mixed> $meta 附加信息（控制器名、动作名等），只用于展示与调试
+     */
+    public function add(string $method, string $path, callable $handler, array $meta = []): void
     {
         $method = strtoupper($method);
         $path = $this->normalize($path);
@@ -43,6 +46,7 @@ class Router
             'regex' => $regex,
             'params' => $params,
             'handler' => $handler,
+            'meta' => $meta,
         ];
 
         $this->pathPatterns[$path] = $params === [] ? null : $regex;
@@ -103,6 +107,29 @@ class Router
     public function count(): int
     {
         return count($this->routes);
+    }
+
+    /**
+     * 已注册路由的只读快照，按注册顺序。
+     *
+     * 只暴露 method / path / handler，正则与参数名属于内部实现细节。
+     *
+     * @return array<int, array{method: string, path: string, handler: callable, meta: array<string, mixed>}>
+     */
+    public function routes(): array
+    {
+        $snapshot = [];
+
+        foreach ($this->routes as $route) {
+            $snapshot[] = [
+                'method'  => $route['method'],
+                'path'    => $route['path'],
+                'handler' => $route['handler'],
+                'meta'    => $route['meta'],
+            ];
+        }
+
+        return $snapshot;
     }
 
     /**

@@ -1,0 +1,11 @@
+#!/usr/bin/env php
+<?php
+
+use phpet\console\Console;
+use phpet\core\Application;
+
+require dirname(__DIR__) . '/bootstrap/autoload.php';
+
+$app = new Application(require dirname(__DIR__) . '/config/app.php');
+
+exit((new Console($app))->run());
