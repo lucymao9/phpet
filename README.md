@@ -25,7 +25,7 @@
 - **缓存** —— PSR-16 同签名契约 + 文件驱动，键校验与原子写
 - **即开即用** —— 装配收敛到 `Application` 一个类，入口 9 行；`composer create-project` 或 clone 下来直接能跑
 - **仍无第三方运行时依赖** —— 数据库用 `PDO`，缓存用手写文件驱动，命令行自己解析参数
-- **自带测试套件** —— 零依赖 runner，299 个单元用例 + 20 个真实 HTTP 端到端用例
+- **自带测试套件** —— 零依赖 runner，300 个单元用例 + 20 个真实 HTTP 端到端用例
 
 ---
 
@@ -895,7 +895,7 @@ Logger::error('db down', ['trace' => $e->getTraceAsString()]);
 不依赖 PHPUnit，零第三方依赖，clone 下来直接能跑：
 
 ```bash
-php tests/run.php                # 单元 + 集成：299 个用例
+php tests/run.php                # 单元 + 集成：300 个用例
 php tests/run.php router         # 只跑名称或文件名含 "router" 的用例
 php tests/run.php --no-color     # 关掉颜色
 php tests/e2e.php                # 端到端：起 php -S 打真实 HTTP

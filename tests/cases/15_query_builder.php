@@ -99,6 +99,30 @@ test('whereGroup 生成括号分组，orWhere 接在后面', function () {
     );
 });
 
+test('orWhere 两参写法不会被误认成三参', function () {
+    // 回归用例：早前 orWhere 用 array_merge 展开转发，func_num_args()
+    // 在 where() 里看到的是 3，于是把值当成了操作符。
+    $q = qbMem()->table('users')->where('city', 'SH')->orWhere('city', 'BJ');
+
+    assertSame(
+        'select * from `users` where `city` = ? or `city` = ?',
+        $q->toSql()
+    );
+    assertSame(['SH', 'BJ'], $q->bindings());
+
+    $q3 = qbMem()->table('users')->where('age', '>', 18)->orWhere('age', '<', 10);
+    assertSame(
+        'select * from `users` where `age` > ? or `age` < ?',
+        $q3->toSql()
+    );
+
+    $qn = qbMem()->table('users')->where('id', 1)->orWhere('deleted_at', null);
+    assertSame(
+        'select * from `users` where `id` = ? or `deleted_at` is null',
+        $qn->toSql()
+    );
+});
+
 test('whereBetween 与 whereLike', function () {
     $sql = qbMem()->table('users')
         ->whereBetween('age', 18, 30)
