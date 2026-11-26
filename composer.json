@@ -4,5 +4,9 @@
       "phpet\\": "src/",
       "app\\": "app/"
     }
+  },
+  "scripts": {
+    "test": "php tests/run.php",
+    "test:e2e": "php tests/e2e.php"
   }
 }

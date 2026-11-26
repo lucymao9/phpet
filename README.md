@@ -18,6 +18,7 @@
 - **中间件** —— `before` 正序 / `after` 逆序，支持短路与异常透传
 - **内容协商** —— 同一套异常处理，浏览器拿 HTML 错误页，API 拿 JSON
 - **分级日志** —— debug / info / warning / error，落盘在 web 根之外
+- **自带测试套件** —— 零依赖 runner，184 个单元用例 + 20 个真实 HTTP 端到端用例
 
 ---
 
@@ -54,6 +55,11 @@ APP_DEBUG=1 php -S 127.0.0.1:8000 -t public public/index.php
 ├── runtime/
 │   ├── cache/                # 路由缓存（自动生成，可随时删除）
 │   └── logs/                 # 日志（web 根之外，已 gitignore）
+├── tests/                    # 零依赖测试套件
+│   ├── run.php               # 入口：php tests/run.php
+│   ├── e2e.php               # 端到端：php tests/e2e.php
+│   ├── cases/                # 用例，按被测单元分文件
+│   └── fixtures/             # 测试替身
 └── vendor/                   # composer 产物
 ```
 
@@ -586,6 +592,74 @@ Logger::error('db down', ['trace' => $e->getTraceAsString()]);
 
 ---
 
+## 测试
+
+不依赖 PHPUnit，零第三方依赖，clone 下来直接能跑：
+
+```bash
+php tests/run.php                # 单元 + 集成：184 个用例
+php tests/run.php router         # 只跑名称或文件名含 "router" 的用例
+php tests/run.php --no-color     # 关掉颜色
+php tests/e2e.php                # 端到端：起 php -S 打真实 HTTP
+```
+
+`composer test` / `composer test:e2e` 是同样两条命令的别名。
+
+### 目录结构
+
+| 路径 | 作用 |
+| --- | --- |
+| `tests/run.php` | 运行器：遍历 `cases/`、统计、失败清单、退出码 |
+| `tests/lib.php` | 断言库与 `Harness`（打印、计时、断言计数） |
+| `tests/bootstrap.php` | 载入类、注册 fixture 自动加载、把日志重定向到临时目录 |
+| `tests/cases/*.php` | 用例，按被测单元分文件 |
+| `tests/fixtures/` | 测试替身：DTO、中间件、容器依赖、控制器 |
+| `tests/e2e.php` | 端到端，独立进程，不影响单元测试的速度 |
+
+### 覆盖范围
+
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `01_router.php` | 路径归一、`{id:\d+}` 约束、静态优先、405 + `Allow`、HEAD、`preg_quote` |
+| `02_validator.php` | 全部内置规则、`Required` 的空值语义、分组、嵌套、`Each` 下标、占位符 |
+| `03_dto_resolver.php` | 标量转换、嵌套不串用上层数据、类型不符时保留默认值 |
+| `04_container.php` | 自动装配、单例、`bind` 失效、循环依赖、不可实例化 |
+| `05_request.php` | Header 大小写、`path()` 的双斜杠回归、`wantsJson()` 矩阵 |
+| `06_response.php` | 各响应助手的类型与状态、JSON 编码失败降级、下载头 |
+| `07_route_cache.php` | 签名失效（mtime / size / 增删文件）、版本号、损坏自愈、写不进去 |
+| `08_middleware.php` | before 正序 / after 逆序、短路、异常仍进 after、四种注册拒绝路径 |
+| `09_controller_scanner.php` | 前缀拼接、OPTIONS 占位、DTO 注入、缓存路径与扫描路径等价、按需实例化 |
+| `10_error_handler.php` | JSON / HTML 分支、debug 才透出细节、HTML 转义、`wantsHtml()` 矩阵 |
+| `11_logger.php` | 落盘格式、级别过滤、目录不可写时退回 `error_log()` |
+| `e2e.php` | 真实请求下的 `$_SERVER` / `php://input` 解析、响应头下发、HEAD 空体、内容协商 |
+
+### 写一个用例
+
+```php
+test('路径归一：尾斜杠与重复斜杠', function () {
+    $router = makeRouter();
+    $router->add('GET', '/ping', fn() => Response::text('pong'));
+
+    assertSame('pong', $router->dispatch('GET', '/ping/')->getContent());
+    assertSame('pong', $router->dispatch('GET', '//ping')->getContent());
+});
+```
+
+- 断言失败抛 `AssertionFailed`，**只影响当前用例**，后面的用例照跑，末尾统一列失败清单
+- 失败信息自带调用位置（`[tests/cases/01_router.php:23]`）
+- 可用断言：`assertSame` / `assertEquals` / `assertTrue` / `assertFalse` / `assertNull` / `assertCount` / `assertContains` / `assertArrayHasKey` / `assertStringContains` / `assertMatches` / `assertInstanceOf` / `assertGreaterThan` / `assertFileExists` / `assertThrows`（返回异常对象，可继续断言）
+- 辅助：`mktmp()` / `rmtree()` / `withAccept()` / `withGlobals()`（临时改 `$_SERVER` / `$_GET` 后自动还原）
+- 只想跳过时 `skip('原因')`
+
+### 说明
+
+- 单元测试**不需要** `vendor/`：`bootstrap.php` 会退回内置 PSR-4 加载器
+- 端到端测试走的是 `public/index.php`，仍需先 `composer install`（该入口依赖 `vendor/autoload.php`）
+- 测试期间日志写进系统临时目录，不会污染 `runtime/logs`
+- 退出码：全部通过 `0`，有失败 `1`，可直接接 CI
+
+---
+
 ## 内置示例接口
 
 启动后可直接访问，用于验证框架各部分是否正常：
@@ -624,6 +698,7 @@ curl -s http://127.0.0.1:8000/nope -H 'Accept: text/html'
 - 错误页与异常消息的内建文案是英文（`Route not found`、`Validation failed`），字段级消息可用 `message:` 自定义为中文
 - 路由缓存只缓存「定义」，正则编译仍在每次启动时进行；路由规模很大时可进一步把编译结果一并落盘
 - `#[Route]` 不可重复，一个方法只能有一个路径；多动词请用 `methods: []`
+- 内容协商按 `Accept` 里的**出现位置**判断，不解析 `q` 权重
 - 无 PSR-7 / PSR-15 兼容层，中间件签名是本框架自有约定
 - 未内置 ORM、模板引擎、i18n
-- 仓库内暂无自动化测试套件
+
