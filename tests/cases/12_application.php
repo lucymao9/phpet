@@ -5,11 +5,13 @@ use fixtures\Recorder;
 use fixtures\RecordingMiddleware;
 use fixtures\RetagMiddleware;
 use fixtures\ShortCircuitMiddleware;
+use phpet\cache\FileCache;
 use phpet\core\Application;
 use phpet\core\Container;
 use phpet\core\Exception\ExceptionHandler;
 use phpet\core\Log\Logger;
 use phpet\core\Request;
+use phpet\core\RouteCache;
 
 /**
  * 在一个独立 basePath 下装配 Application，结束后清理。
@@ -56,9 +58,20 @@ test('路径类配置默认从 basePath 推导', function () {
 
         $app->handle(appRequest('/api/items/1'));
 
-        // 默认 cachePath / logDir 都落在 basePath 下
-        assertFileExists($base . '/runtime/cache/routes.php');
+        // 默认 logDir / cacheDir 都落在 basePath 下，路由表存进 cacheDir
+        assertTrue(is_dir($base . '/runtime/cache/store'), '默认缓存目录应在 basePath 下');
+        assertTrue($app->cache()->has(RouteCache::DEFAULT_KEY), '路由表应落进通用缓存');
     });
+});
+
+test('cachePath 已移除，报错要指出替代方案', function () {
+    $e = assertThrows(
+        InvalidArgumentException::class,
+        fn() => new Application(['basePath' => sys_get_temp_dir(), 'cachePath' => '/tmp/x.php']),
+        'removed in 0.3.0'
+    );
+
+    assertStringContains('cacheDir', $e->getMessage(), '应告诉用户改用 cacheDir');
 });
 
 test('未知配置项立即报错并列出支持的项', function () {
@@ -223,19 +236,19 @@ test('中间件支持 [class, params] 写法', function () {
 test('非 debug 模式会写缓存，debug 模式不写', function () {
     withApp([], function (Application $app, string $base) {
         $app->handle(appRequest('/api/items/1'));
-        assertFileExists($base . '/runtime/cache/routes.php', '非 debug 应落盘');
+        assertTrue($app->cache()->has(RouteCache::DEFAULT_KEY), '非 debug 应落盘');
     });
 
     withApp(['debug' => true], function (Application $app, string $base) {
         $app->handle(appRequest('/api/items/1'));
-        assertFalse(is_file($base . '/runtime/cache/routes.php'), 'debug 模式应绕过缓存');
+        assertFalse($app->cache()->has(RouteCache::DEFAULT_KEY), 'debug 模式应绕过缓存');
     });
 });
 
 test('cache=false 时不写缓存文件', function () {
     withApp(['cache' => false], function (Application $app, string $base) {
         $app->handle(appRequest('/api/items/1'));
-        assertFalse(is_file($base . '/runtime/cache/routes.php'));
+        assertFalse($app->cache()->has(RouteCache::DEFAULT_KEY));
     });
 });
 
@@ -254,7 +267,9 @@ test('第二个实例命中缓存，行为与首次一致', function () {
     try {
         $first = (new Application($options))->handle(appRequest('/api/items/7'));
         assertSame(200, $first->getStatus());
-        assertFileExists($base . '/runtime/cache/routes.php');
+
+        $store = new FileCache($base . '/runtime/cache/store');
+        assertTrue($store->has(RouteCache::DEFAULT_KEY), '首次装配应写入路由表');
 
         // 第二次装配应当读缓存而不是重新扫描
         $second = (new Application($options))->handle(appRequest('/api/items/7'));

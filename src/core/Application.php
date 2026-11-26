@@ -26,7 +26,6 @@ class Application
         'debug',
         'controllerDir',
         'controllerNamespace',
-        'cachePath',
         'cache',
         'logDir',
         'logLevel',
@@ -44,7 +43,6 @@ class Application
     private bool $debug;
     private string $controllerDir;
     private string $controllerNamespace;
-    private string $cachePath;
     private bool $cacheEnabled;
     private string $logDir;
     private string $logLevel;
@@ -77,7 +75,6 @@ class Application
      *     debug?: bool,
      *     controllerDir?: string,
      *     controllerNamespace?: string,
-     *     cachePath?: string,
      *     cache?: bool,
      *     logDir?: string,
      *     logLevel?: string,
@@ -93,6 +90,15 @@ class Application
      */
     public function __construct(array $options = [])
     {
+        // 0.3.0 起路由表改走 CacheInterface，cachePath 这个「缓存文件路径」概念不存在了。
+        // 单独拦一道，比让用户对着 Unknown option 猜要好。
+        if (array_key_exists('cachePath', $options)) {
+            throw new \InvalidArgumentException(
+                'Application option "cachePath" was removed in 0.3.0: the route table is now stored '
+                . 'through CacheInterface. Drop the option, or point "cacheDir" at the directory you want.'
+            );
+        }
+
         $unknown = array_diff(array_keys($options), self::OPTIONS);
         if ($unknown !== []) {
             // 配置项写错时立刻报错，比「设置没生效但也不报错」好排查得多
@@ -114,8 +120,6 @@ class Application
             '\\'
         );
 
-        $this->cachePath = $options['cachePath']
-            ?? RouteCache::defaultPath($this->basePath);
         $this->cacheEnabled = (bool)($options['cache'] ?? true);
 
         $this->logDir = $options['logDir'] ?? Logger::defaultDir($this->basePath);
@@ -281,14 +285,14 @@ class Application
         // debug 模式完全绕过缓存：改完控制器立刻生效，
         // 不用去猜签名判定的时间粒度
         if ($this->cacheEnabled && !$this->debug) {
-            $cache = new RouteCache($this->cachePath);
+            $cache = new RouteCache($this->cache());
             $signature = $cache->signature($this->controllerDir);
 
             if ($cache->isFresh($signature)) {
                 $definitions = $cache->load();
                 $scanner->registerDefinitions($definitions);
                 Logger::debug('Routes loaded from cache', [
-                    'file'   => $cache->path(),
+                    'key'    => $cache->key(),
                     'routes' => count($definitions),
                 ]);
             } else {

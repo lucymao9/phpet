@@ -37,6 +37,6 @@ return [
         'charset'  => getenv('DB_CHARSET') ?: 'utf8mb4',
     ],
 
-    // 通用缓存目录（路由缓存是另一个文件，见 cachePath）
+    // 缓存目录：路由表与业务缓存都存在这里，一个目录一次清理干净
     'cacheDir' => $root . '/runtime/cache/store',
 ];

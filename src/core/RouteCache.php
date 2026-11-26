@@ -2,42 +2,47 @@
 
 namespace phpet\core;
 
+use phpet\cache\CacheInterface;
 use phpet\core\Log\Logger;
 use Throwable;
 
 /**
- * 路由缓存：把扫描出的路由定义落盘，避免每次请求都反射全部控制器。
+ * 路由表缓存：把扫描出的路由定义存进缓存，避免每次请求都反射全部控制器。
  *
- * 缓存有效性由「源文件签名」判定：目录下所有 PHP 文件的路径 + mtime + size
- * 参与哈希，任一文件改动都会让缓存失效并自动重建。不需要手动清理。
+ * 存储完全交给 CacheInterface，本类只负责回答「这份数据还算不算新鲜」：
+ * 源文件签名 + 结构版本。换驱动（文件 → Redis）不需要动这里，
+ * 也不需要动 Application——这正是把它收敛到 CacheInterface 的意义。
  *
- * 缓存文件是 PHP 源码（`return [...]`），可被 opcache 缓存，
- * 且落在 runtime/ 下，位于 web 根之外。
+ * 值的形状是 ['version' => int, 'signature' => array, 'routes' => array]，
+ * 和缓存键无关，所以键可以是一个稳定的常量。
  */
 class RouteCache
 {
     /**
      * 缓存结构版本。路由定义的字段发生变化时自增，让旧缓存自动失效。
+     *
+     * 版本号放在**值**里而不是键里：升级后新值会直接覆写旧值，
+     * 不会留下一批永远读不到、也没人负责清理的孤儿键。
      */
-    private const VERSION = 2;
-
-    public function __construct(
-        private string $path,
-    ) {
-    }
+    private const VERSION = 3;
 
     /**
-     * 默认缓存路径。由项目根推导，与框架自身的安装位置无关
-     * （装在 vendor/ 下时也同样正确）。
+     * 默认键名。不含 PSR-16 保留字符，换任何驱动都能用。
      */
-    public static function defaultPath(string $basePath): string
-    {
-        return rtrim($basePath, '/\\') . '/runtime/cache/routes.php';
+    public const DEFAULT_KEY = 'route.table';
+
+    private string $key;
+
+    public function __construct(
+        private CacheInterface $cache,
+        string $key = self::DEFAULT_KEY,
+    ) {
+        $this->key = $key;
     }
 
-    public function path(): string
+    public function key(): string
     {
-        return $this->path;
+        return $this->key;
     }
 
     /**
@@ -79,16 +84,12 @@ class RouteCache
     }
 
     /**
-     * 缓存是否可用：文件存在、可读、版本匹配、签名一致、且确实有路由。
+     * 缓存是否可用：命中、版本匹配、签名一致、且确实有路由。
      */
     public function isFresh(array $signature): bool
     {
         // 目录空/不存在时绝不使用缓存，交给扫描阶段抛错
         if (($signature['files'] ?? 0) === 0) {
-            return false;
-        }
-
-        if (!is_file($this->path) || !is_readable($this->path)) {
             return false;
         }
 
@@ -117,61 +118,43 @@ class RouteCache
     }
 
     /**
-     * 写入缓存。先写临时文件再 rename，避免并发下读到半截内容。
+     * 写入缓存，不带 TTL——失效靠签名判定，不靠时间。
      */
     public function save(array $signature, array $routes): bool
     {
-        $dir = dirname($this->path);
-        if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
-            // 缓存只是优化，写不进去不影响请求，记一笔就够了
-            Logger::warning('Route cache directory not writable', ['dir' => $dir]);
-            return false;
-        }
-
-        $data = [
+        $ok = $this->cache->set($this->key, [
             'version'   => self::VERSION,
             'signature' => $signature,
             'routes'    => $routes,
-        ];
+        ]);
 
-        $code = "<?php\n"
-            . "// 由 phpet 自动生成，请勿手动修改。删除本文件可强制重建。\n"
-            . "return " . var_export($data, true) . ";\n";
-
-        $tmp = $this->path . '.' . getmypid() . '.tmp';
-
-        if (@file_put_contents($tmp, $code, LOCK_EX) === false) {
-            Logger::warning('Route cache write failed', ['file' => $tmp]);
-            return false;
+        if (!$ok) {
+            // 缓存只是优化，写不进去不影响请求，记一笔就够了
+            Logger::warning('Route cache write failed', ['key' => $this->key]);
         }
 
-        if (!@rename($tmp, $this->path)) {
-            @unlink($tmp);
-            Logger::warning('Route cache rename failed', ['file' => $this->path]);
-            return false;
-        }
-
-        return true;
+        return $ok;
     }
 
     public function clear(): bool
     {
-        return !is_file($this->path) || @unlink($this->path);
+        return $this->cache->delete($this->key);
     }
 
     /**
-     * @return array<string, mixed>|null 结构损坏或语法错误时返回 null
+     * @return array<string, mixed>|null 未命中或结构不对时返回 null
      */
     private function read(): ?array
     {
         try {
-            $data = include $this->path;
+            $data = $this->cache->get($this->key);
         } catch (Throwable $e) {
-            // 缓存被改坏（语法错误等）不应该拖垮请求，直接当作失效
+            // 驱动出问题（文件被改坏、Redis 连不上）不应该拖垮请求，当作失效即可
             Logger::warning('Route cache unreadable, will rebuild', [
-                'file'  => $this->path,
+                'key'   => $this->key,
                 'error' => $e->getMessage(),
             ]);
+
             return null;
         }
 

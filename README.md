@@ -2,7 +2,7 @@
 
 用 PHP 8 属性（Attribute）声明路由、取参与校验的极简 MVC 框架。零第三方运行时依赖。
 
-**当前版本**：v0.2.0（相对 v0.1.0 新增控制台、数据库、缓存三层）
+**当前版本**：v0.3.0（相对 v0.2.0：路由缓存收敛到 `CacheInterface`，移除 `cachePath` 选项）
 
 **环境要求**：PHP >= 8.1（在 8.5.3 上验证）、ext-mbstring、ext-json、ext-filter
 
@@ -13,7 +13,7 @@
 ## 特性
 
 - **注解驱动路由** —— `#[Controller]` + `#[Route]`，支持路径参数与正则约束
-- **路由缓存** —— 路由表落盘，源文件变动自动失效，启动不再反射全部控制器
+- **路由缓存** —— 路由表存进通用缓存，源文件变动自动失效，启动不再反射全部控制器
 - **自动参数注入** —— 路径参数、查询串、请求体、Header、Cookie、DTO 按类型自动装配
 - **声明式校验** —— 10 条校验注解，支持分组、嵌套 DTO、数组逐项、自定义消息与占位符
 - **DI 容器** —— 反射自动装配、单例缓存、循环依赖检测
@@ -25,7 +25,7 @@
 - **缓存** —— PSR-16 同签名契约 + 文件驱动，键校验与原子写
 - **即开即用** —— 装配收敛到 `Application` 一个类，入口 9 行；`composer create-project` 或 clone 下来直接能跑
 - **仍无第三方运行时依赖** —— 数据库用 `PDO`，缓存用手写文件驱动，命令行自己解析参数
-- **自带测试套件** —— 零依赖 runner，300 个单元用例 + 20 个真实 HTTP 端到端用例
+- **自带测试套件** —— 零依赖 runner，305 个单元用例 + 20 个真实 HTTP 端到端用例
 
 ---
 
@@ -41,7 +41,7 @@ cd my-app
 php -S 127.0.0.1:8000 -t public public/index.php
 ```
 
-还没发布到 Packagist 时，直接从 VCS 仓库拉（会取最新的稳定标签，当前 `v0.2.0`）：
+还没发布到 Packagist 时，直接从 VCS 仓库拉（会取最新的稳定标签）：
 
 ```bash
 composer create-project \
@@ -101,7 +101,7 @@ APP_DEBUG=1 php -S 127.0.0.1:8000 -t public public/index.php
 │   ├── core/                 # Application、容器、路由、请求响应、校验、日志
 │   └── db/                   # 连接、查询构造器、迁移器
 ├── runtime/
-│   ├── cache/                # 路由缓存（自动生成，可随时删除）
+│   ├── cache/store/          # 缓存（路由表 + 业务缓存，自动生成，可随时删除）
 │   └── logs/                 # 日志（web 根之外，已 gitignore）
 ├── tests/                    # 零依赖测试套件
 │   ├── run.php               # 入口：php tests/run.php
@@ -194,56 +194,72 @@ public function show(int $id)
 
 ## 路由缓存
 
-把扫描结果落盘，避免每次请求都反射全部控制器。
+把扫描结果存进缓存，避免每次请求都反射全部控制器。
 
 **失效判定**：对 `app/controller` 下所有 PHP 文件取「路径 + mtime + size」做哈希存入缓存，每次启动重算一次比对。新增、删除、修改控制器都会让缓存自动失效并重建——**不需要手动清理**。
 
-**存放位置**：`runtime/cache/routes.php`，内容是一段 `return [...];` 的 PHP 源码，可被 opcache 缓存，且位于 web 根之外。
+**存放位置**：走的是和业务缓存**同一个** `CacheInterface`，键是 `route.table`，默认落在 `runtime/cache/store/`。这么做换来三件事：
+
+- 换驱动（文件 → Redis → 内存）只改 `cacheDir` 那一层的实现，路由缓存跟着走，`RouteCache` 一行不用动
+- `php bin/console cache:clear` 一次清干净，不用再记「路由缓存还得另外删」
+- 少一套重复实现：路径推导、目录创建、原子写入、损坏兜底全部由缓存驱动负责
+
+代价是放弃了「缓存文件是 PHP 源码、可被 opcache 缓存」这一点。实测这个代价是负的：
+
+**读缓存开销**（1216 条路由，单次，PHP 8.5.3）：
+
+| 存法 | 读取 | 体积 |
+| --- | --- | --- |
+| PHP 源码 + `include`（0.2.0 及以前） | 1.55 ms | 385 KB |
+| `serialize` + `unserialize`（现在） | 0.28 ms | 275 KB |
+
+opcache 省掉的是「编译」，省不掉「照 opcode 把 1216 条嵌套数组一条条建出来」——后者比一次 C 层的 `unserialize` 贵得多。所以换成缓存抽象不但没有性能损失，反而快了一个量级。
 
 **debug 模式**：`APP_DEBUG=1` 时完全跳过缓存（既不读也不写），改完控制器刷新即生效，不用等签名判定的时间粒度。
 
-**强制重建**：删掉缓存文件即可。
+**强制重建**：
 
 ```bash
-rm -f runtime/cache/routes.php
+php bin/console cache:clear
 ```
 
-**缓存内容**形如（实际是 `var_export` 输出，此处略去了 `0 =>` 之类的下标以方便阅读）：
+路由表下次启动会自动重建，业务缓存则会被一起清掉——不想连带清空的话，单独删那个键：
 
 ```php
-<?php
-return array(
-  'version'   => 2,
-  'signature' => array('files' => 2, 'hash' => '77d0c03e...'),
-  'routes'    => array(
-    array(
-      'path'        => '/api/users',
-      'methods'     => array('GET'),
-      'controller'  => 'app\\controller\\UserController',
-      'action'      => 'index',
-      'middlewares' => array('auth', 'log'),
-    ),
-    // ...
-  ),
-);
+$app->cache()->delete(\phpet\core\RouteCache::DEFAULT_KEY);
+```
+
+**缓存内容**是一个普通数组（`serialize` 存，不再是 PHP 源码）：
+
+```php
+[
+    'version'   => 3,
+    'signature' => ['files' => 2, 'hash' => '77d0c03e...'],
+    'routes'    => [
+        [
+            'path'        => '/api/users',
+            'methods'     => ['GET'],
+            'controller'  => 'app\controller\UserController',
+            'action'      => 'index',
+            'middlewares' => ['auth', 'log'],
+        ],
+        // ...
+    ],
+]
 ```
 
 要点：
 
 - 缓存只存**路由定义**，不存闭包；命中缓存时只对实际调用的那个方法做一次反射
-- 缓存文件被写坏（语法错误、结构不对）会被当作失效并自动重建，不会让请求 500
-- 写入走「临时文件 + rename」，并发下不会读到半截内容
-- 结构版本号变化（框架升级）会自动作废旧缓存
-- `runtime/` 必须对 web 用户只读，否则缓存文件可被写入即等于任意代码执行——这是所有文件缓存的通例
+- 缓存被写坏（半截内容、结构不对、驱动抛异常）一律当作失效并自动重建，不会让请求 500
+- 写入的原子性由驱动保证（文件驱动是「临时文件 + rename」），并发下不会读到半截内容
+- 结构版本号存在**值**里（不是键里）：框架升级后新值直接覆写旧值，不会留下清不掉的孤儿键
+- `clear()` 只删 `route.table` 这一个键，不会顺手清掉业务缓存
+- `runtime/` 必须对 web 用户只读，否则缓存可被写入即等于任意代码执行——这是所有文件缓存的通例
 
-**实测**（200 个控制器 / 1216 条路由）：
+**整体收益**（0.2.0 时实测，200 个控制器 / 1216 条路由）：反射扫描 9.99 ms → 命中缓存 3.33 ms。按新的读取开销，这一项还能再省约 1.3 ms。
 
-| 启动方式 | 耗时 |
-| --- | --- |
-| 反射扫描 | 9.99 ms |
-| 签名计算 + 读缓存注册 | 3.33 ms |
-
-约 3 倍提升，节省约 6.7 ms/请求。规模小时绝对值不大，但缓存路径还额外避免了启动阶段加载全部控制器类——控制器的构造逻辑（连数据库、读配置）不会为无关请求执行。
+规模小时绝对值不大，但缓存路径还额外避免了启动阶段加载全部控制器类——控制器的构造逻辑（连数据库、读配置）不会为无关请求执行。
 
 ---
 
@@ -267,7 +283,7 @@ php bin/console help db:rollback
 | `db:migrate` | 执行待执行迁移 |
 | `db:rollback [--steps=1]` | 按批次回滚 |
 | `db:status` | 查看迁移状态 |
-| `cache:clear [--expired]` | 清空通用缓存 / 只删过期项 |
+| `cache:clear [--expired]` | 清空缓存（含路由表）/ 只删过期项 |
 
 `route:list` 走的是与线上请求**完全相同**的装配流程（含路由缓存），所以列出来的就是真实生效的那张表，而不是「理论上注册的」。每个路径的 `OPTIONS` 占位路由由框架自动补，默认不显示，加 `--all` 才列：
 
@@ -448,7 +464,7 @@ $cache->clear();
 - TTL 非正数视为立刻过期；`DateInterval` 也接受
 - 过期文件按读时惰性删除。长期没人读的键会滞留，用 `php bin/console cache:clear --expired` 或 `FileCache::prune()` 定期清理
 
-注意区分两个「缓存」：`cachePath` 是**路由表**的缓存文件，`cacheDir` 是**通用缓存**目录，互不相干。
+**路由表也在这里**：路由缓存不再是一个独立的 PHP 文件，而是这个缓存里的 `route.table` 键。所以 `cache:clear` 会把路由表一起清掉（下次启动自动重建），想单独删就用 `$app->cache()->delete(RouteCache::DEFAULT_KEY)`。详见「路由缓存」一节。
 
 ---
 
@@ -839,7 +855,6 @@ $repo = $container->get(UserRepositoryInterface::class);
 | `debug` | `APP_DEBUG` 环境变量 | 影响错误页细节、日志级别、是否跳过路由缓存 |
 | `controllerDir` | `{basePath}/app/controller` | 控制器扫描目录 |
 | `controllerNamespace` | `app\controller` | 与上面目录对应的命名空间 |
-| `cachePath` | `{basePath}/runtime/cache/routes.php` | 路由缓存文件 |
 | `cache` | `true` | 关掉后每次请求都重新扫描 |
 | `logDir` | `{basePath}/runtime/logs` | 日志目录 |
 | `logLevel` | debug ? `debug` : `info` | 日志最小级别 |
@@ -850,9 +865,11 @@ $repo = $container->get(UserRepositoryInterface::class);
 | `container` | 新建 | 传入已装配的容器 |
 | `db` | `[]` | 数据库配置，见「数据库」一节 |
 | `migrations` | `{basePath}/database/migrations` | 迁移文件目录 |
-| `cacheDir` | `{basePath}/runtime/cache/store` | 通用缓存目录（与路由缓存 `cachePath` 无关） |
+| `cacheDir` | `{basePath}/runtime/cache/store` | 缓存目录，路由表与业务缓存共用 |
 
 路径全部从 `basePath` 推导、不依赖框架自身安装位置，所以整套代码放进 `vendor/` 也能正常工作。
+
+> **升级提示**：`cachePath` 选项在 0.3.0 已移除（路由表改走 `CacheInterface`）。传了会立刻抛异常并提示改用 `cacheDir`，不会静默忽略。
 
 ### 环境变量
 
@@ -895,7 +912,7 @@ Logger::error('db down', ['trace' => $e->getTraceAsString()]);
 不依赖 PHPUnit，零第三方依赖，clone 下来直接能跑：
 
 ```bash
-php tests/run.php                # 单元 + 集成：300 个用例
+php tests/run.php                # 单元 + 集成：305 个用例
 php tests/run.php router         # 只跑名称或文件名含 "router" 的用例
 php tests/run.php --no-color     # 关掉颜色
 php tests/e2e.php                # 端到端：起 php -S 打真实 HTTP
@@ -924,7 +941,7 @@ php tests/e2e.php                # 端到端：起 php -S 打真实 HTTP
 | `04_container.php` | 自动装配、单例、`bind` 失效、循环依赖、不可实例化 |
 | `05_request.php` | Header 大小写、`path()` 的双斜杠回归、`wantsJson()` 矩阵 |
 | `06_response.php` | 各响应助手的类型与状态、JSON 编码失败降级、下载头 |
-| `07_route_cache.php` | 签名失效（mtime / size / 增删文件）、版本号、损坏自愈、写不进去 |
+| `07_route_cache.php` | 签名失效（mtime / size / 增删文件）、版本号、损坏自愈、写不进去、驱动独立（内存驱动跑同一套流程） |
 | `08_middleware.php` | before 正序 / after 逆序、短路、异常仍进 after、四种注册拒绝路径 |
 | `09_controller_scanner.php` | 前缀拼接、OPTIONS 占位、DTO 注入、缓存路径与扫描路径等价、按需实例化 |
 | `10_error_handler.php` | JSON / HTML 分支、debug 才透出细节、HTML 转义、`wantsHtml()` 矩阵 |
@@ -1000,6 +1017,7 @@ curl -s http://127.0.0.1:8000/nope -H 'Accept: text/html'
 - `ValidationException` 返回 **400** 而非 422。改成 422 更符合部分客户端的预期，但会影响既有调用方
 - 错误页与异常消息的内建文案是英文（`Route not found`、`Validation failed`），字段级消息可用 `message:` 自定义为中文
 - 路由缓存只缓存「定义」，正则编译仍在每次启动时进行；路由规模很大时可进一步把编译结果一并落盘
+- 路由表与业务缓存放在同一个驱动里，所以 `cache:clear` 会把路由表一起清掉（下次启动自动重建，代价是多一次扫描）。要精确控制就自己 `delete(RouteCache::DEFAULT_KEY)`
 - `#[Route]` 不可重复，一个方法只能有一个路径；多动词请用 `methods: []`
 - 内容协商按 `Accept` 里的**出现位置**判断，不解析 `q` 权重
 - 无 PSR-7 / PSR-15 兼容层，中间件签名是本框架自有约定
