@@ -23,6 +23,9 @@ use ReflectionParameter;
 
 class ControllerScanner
 {
+    /** @var array<int, array{path:string, methods:string[], controller:string, action:string, middlewares:string[]}> */
+    private array $definitions = [];
+
     public function __construct(
         private Router             $router,
         private MiddlewareRegistry $middlewareRegistry,
@@ -45,6 +48,7 @@ class ControllerScanner
 
         $namespace = trim($namespace, '\\');
         $scanned = [];
+        $this->definitions = [];
 
         $files = new \RecursiveIteratorIterator(
             new \RecursiveDirectoryIterator($directory, \FilesystemIterator::SKIP_DOTS)
@@ -72,6 +76,10 @@ class ControllerScanner
 
         sort($scanned);
 
+        // 扫描只负责产出定义，注册统一交给 registerDefinitions，
+        // 与"从缓存加载"共用同一套逻辑，避免两条路径行为分叉
+        $this->registerDefinitions($this->definitions);
+
         return $scanned;
     }
 
@@ -90,10 +98,9 @@ class ControllerScanner
         return $namespace === '' ? $className : $namespace . '\\' . $className;
     }
 
-    public function scan(string $controllerClass)
+    public function scan(string $controllerClass): void
     {
         $refClass = new ReflectionClass($controllerClass);
-        $controller = $this->container->get($controllerClass);
 
         // 类级注解只需解析一次，不必放进方法循环
         $prefix = '';
@@ -110,37 +117,94 @@ class ControllerScanner
             foreach ($method->getAttributes(Route::class) as $attr) {
                 /** @var Route $route */
                 $route = $attr->newInstance();
-                $path = $this->normalizePath($prefix, $route->path);
-                $methodMiddlewares = $this->collectMiddlewareNames(
-                    $method->getAttributes(Middleware::class)
-                );
-                $middlewares = array_merge($classMiddlewares, $methodMiddlewares);
 
-                foreach ($route->methods as $httpMethod) {
-                    $this->router->add(
-                        $httpMethod,
-                        $path,
-                        function (array $pathParams) use ($controller, $method, $middlewares) {
-                            return $this->executeWithMiddleware(
-                                $middlewares,
-                                fn() => $method->invokeArgs($controller, $this->resolveArguments($method, $pathParams))
-                            );
-                        }
-                    );
-                }
+                $methods = array_values(array_unique(
+                    array_map('strtoupper', $route->methods)
+                ));
 
-                // 预检占位路由：让 cors 中间件有机会短路返回 204；
-                // 未启用 cors 时也返回 204 而不是 405
+                $this->definitions[] = [
+                    'path'        => $this->normalizePath($prefix, $route->path),
+                    'methods'     => $methods,
+                    'controller'  => $controllerClass,
+                    'action'      => $method->getName(),
+                    'middlewares' => array_merge(
+                        $classMiddlewares,
+                        $this->collectMiddlewareNames($method->getAttributes(Middleware::class))
+                    ),
+                ];
+            }
+        }
+    }
+
+    /**
+     * 收集到的路由定义，可直接写入缓存。
+     *
+     * @return array<int, array{path:string, methods:string[], controller:string, action:string, middlewares:string[]}>
+     */
+    public function definitions(): array
+    {
+        return $this->definitions;
+    }
+
+    /**
+     * 由定义注册路由。扫描与缓存加载共用此方法，保证两条路径行为一致。
+     *
+     * 缓存路径下不再实例化控制器、也不再反射所有方法，
+     * 只有命中的那个方法才会在 invoke() 里反射一次。
+     */
+    public function registerDefinitions(array $definitions): void
+    {
+        foreach ($definitions as $def) {
+            $controller = $def['controller'];
+            $action = $def['action'];
+            $path = $def['path'];
+            $middlewares = $def['middlewares'] ?? [];
+
+            foreach ($def['methods'] as $httpMethod) {
                 $this->router->add(
-                    'OPTIONS',
+                    $httpMethod,
                     $path,
-                    fn() => $this->executeWithMiddleware(
+                    fn(array $pathParams) => $this->invoke(
+                        $controller,
+                        $action,
                         $middlewares,
-                        fn() => (new Response())->status(204)
+                        $pathParams
                     )
                 );
             }
+
+            // 预检占位路由：让 cors 中间件有机会短路返回 204；
+            // 未启用 cors 时也返回 204 而不是 405
+            $this->router->add(
+                'OPTIONS',
+                $path,
+                fn() => $this->executeWithMiddleware(
+                    $middlewares,
+                    fn() => (new Response())->status(204)
+                )
+            );
         }
+    }
+
+    /**
+     * 调用控制器方法。控制器实例按需从容器取（请求内单例）。
+     */
+    public function invoke(
+        string $controllerClass,
+        string $action,
+        array  $middlewares,
+        array  $pathParams
+    ): Response
+    {
+        $method = new ReflectionMethod($controllerClass, $action);
+
+        return $this->executeWithMiddleware(
+            $middlewares,
+            fn() => $method->invokeArgs(
+                $this->container->get($controllerClass),
+                $this->resolveArguments($method, $pathParams)
+            )
+        );
     }
 
     private function normalizePath(string $prefix, string $path): string

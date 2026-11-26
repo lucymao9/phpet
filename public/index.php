@@ -13,6 +13,7 @@ use phpet\core\middleware\MiddlewarePipeline;
 use phpet\core\middleware\MiddlewareRegistry;
 use phpet\core\Request;
 use phpet\core\Response;
+use phpet\core\RouteCache;
 use phpet\core\Router;
 
 // 输出缓冲：控制器里任何意外的 echo 都不会提前发送响应头，
@@ -58,9 +59,27 @@ try {
     $scanner = new ControllerScanner($router, $registry, $container);
 
     // 扫描 app/controller 下所有带 #[Controller] 的类
-    $controllers = $scanner->scanDirectory(__DIR__ . '/../app/controller', 'app\controller');
-    if ($controllers === []) {
-        throw new \RuntimeException('No controllers found under app/controller');
+    $controllerDir = __DIR__ . '/../app/controller';
+    $cache = new RouteCache(RouteCache::defaultPath());
+    $signature = $cache->signature($controllerDir);
+
+    // debug 模式跳过缓存：改完控制器立刻生效，不用担心签名判定的时间粒度
+    if (!$debug && $cache->isFresh($signature)) {
+        $definitions = $cache->load();
+        $scanner->registerDefinitions($definitions);
+        Logger::debug('Routes loaded from cache', [
+            'file'   => $cache->path(),
+            'routes' => count($definitions),
+        ]);
+    } else {
+        $controllers = $scanner->scanDirectory($controllerDir, 'app\controller');
+        if ($controllers === []) {
+            throw new \RuntimeException('No controllers found under ' . $controllerDir);
+        }
+
+        if (!$debug) {
+            $cache->save($signature, $scanner->definitions());
+        }
     }
 
     // 全局中间件包在路由外层，404/405 等未命中路由的响应也能带上 CORS 头
