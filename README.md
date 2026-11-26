@@ -2,6 +2,8 @@
 
 用 PHP 8 属性（Attribute）声明路由、取参与校验的极简 MVC 框架。零第三方运行时依赖。
 
+**当前版本**：v0.1.0
+
 **环境要求**：PHP >= 8.1（在 8.5.3 上验证）、ext-mbstring、ext-json、ext-filter
 
 > 8.1 是因为 `#[Each(rules: [new Required()])]` 这种写法用到了「`new` 初始化器」，该语法自 8.1 起才允许。
@@ -35,13 +37,15 @@ cd my-app
 php -S 127.0.0.1:8000 -t public public/index.php
 ```
 
-还没发布到 Packagist 时，直接从 VCS 仓库拉：
+还没发布到 Packagist 时，直接从 VCS 仓库拉（会取最新的稳定标签，当前 `v0.1.0`）：
 
 ```bash
 composer create-project \
   --repository='{"type":"vcs","url":"git@github.com:you/phpet.git"}' \
-  --stability=dev phpet/phpet my-app
+  phpet/phpet my-app
 ```
+
+想拿未打标签的最新 `dev` 分支，再加 `--stability=dev` 并指定包版本 `phpet/phpet:dev-dev`。
 
 ### 在这个仓库里直接跑
 
