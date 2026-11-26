@@ -14,11 +14,6 @@ declare(strict_types=1);
 require __DIR__ . '/bootstrap.php';
 require __DIR__ . '/lib.php';
 
-if (!is_file(PHPET_ROOT . '/vendor/autoload.php')) {
-    fwrite(STDERR, "public/index.php 依赖 vendor/autoload.php，请先执行 composer install\n");
-    exit(1);
-}
-
 $started = microtime(true);
 
 $filter = null;

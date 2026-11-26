@@ -276,9 +276,15 @@ test('保存到不可写位置时返回 false 而不抛异常', function () {
     });
 });
 
-test('defaultPath 落在 runtime/cache 下', function () {
+test('defaultPath 从项目根推导出 runtime/cache', function () {
     assertSame(
         PHPET_ROOT . '/runtime/cache/routes.php',
-        RouteCache::defaultPath()
+        RouteCache::defaultPath(PHPET_ROOT)
+    );
+
+    // 末尾斜杠不该产生双斜杠
+    assertSame(
+        '/srv/app/runtime/cache/routes.php',
+        RouteCache::defaultPath('/srv/app/')
     );
 });

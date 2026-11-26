@@ -60,7 +60,7 @@ class Logger
             return;
         }
 
-        $dir = self::$dir ?? self::defaultDir();
+        $dir = self::$dir ?? self::defaultDir((string)getcwd());
         if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
             // 日志目录不可写时退回系统日志，绝不因日志失败影响主流程
             error_log("[phpet][{$level}] {$message}");
@@ -83,9 +83,8 @@ class Logger
         );
     }
 
-    public static function defaultDir(): string
+    public static function defaultDir(string $basePath): string
     {
-        // src/core/Log -> 项目根
-        return dirname(__DIR__, 3) . '/runtime/logs';
+        return rtrim($basePath, '/\\') . '/runtime/logs';
     }
 }

@@ -26,10 +26,13 @@ class RouteCache
     ) {
     }
 
-    public static function defaultPath(): string
+    /**
+     * 默认缓存路径。由项目根推导，与框架自身的安装位置无关
+     * （装在 vendor/ 下时也同样正确）。
+     */
+    public static function defaultPath(string $basePath): string
     {
-        // src/core -> 项目根
-        return dirname(__DIR__, 2) . '/runtime/cache/routes.php';
+        return rtrim($basePath, '/\\') . '/runtime/cache/routes.php';
     }
 
     public function path(): string

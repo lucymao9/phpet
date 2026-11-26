@@ -18,15 +18,43 @@
 - **中间件** —— `before` 正序 / `after` 逆序，支持短路与异常透传
 - **内容协商** —— 同一套异常处理，浏览器拿 HTML 错误页，API 拿 JSON
 - **分级日志** —— debug / info / warning / error，落盘在 web 根之外
-- **自带测试套件** —— 零依赖 runner，184 个单元用例 + 20 个真实 HTTP 端到端用例
+- **即开即用** —— 装配收敛到 `Application` 一个类，入口 20 行；`composer create-project` 或 clone 下来直接能跑
+- **自带测试套件** —— 零依赖 runner，201 个单元用例 + 20 个真实 HTTP 端到端用例
 
 ---
 
 ## 快速开始
 
+零第三方**运行时**依赖，`vendor/` 只是自动加载产物。没装 composer 也能跑。
+
+### 起一个新项目
+
+```bash
+composer create-project phpet/phpet my-app
+cd my-app
+php -S 127.0.0.1:8000 -t public public/index.php
+```
+
+还没发布到 Packagist 时，直接从 VCS 仓库拉：
+
+```bash
+composer create-project \
+  --repository='{"type":"vcs","url":"git@github.com:you/phpet.git"}' \
+  --stability=dev phpet/phpet my-app
+```
+
+### 在这个仓库里直接跑
+
+```bash
+git clone <repo> phpet && cd phpet
+php -S 127.0.0.1:8000 -t public public/index.php
+```
+
+`bootstrap/autoload.php` 会优先用 `vendor/autoload.php`，没有就退回内置的 PSR-4 加载器，
+所以 clone 下来不必先 `composer install`。想用 composer 的优化加载器时再执行：
+
 ```bash
 composer dump-autoload -o
-php -S 127.0.0.1:8000 -t public public/index.php
 ```
 
 打开 http://127.0.0.1:8000/api/users?gender=male 就能看到第一个 JSON 响应。
@@ -45,13 +73,15 @@ APP_DEBUG=1 php -S 127.0.0.1:8000 -t public public/index.php
 │   ├── controller/           # 控制器，启动时递归扫描
 │   ├── dto/                  # 数据传输对象，需继承 BaseDto
 │   └── middleware/           # 中间件
+├── bootstrap/
+│   └── autoload.php          # 自动加载入口（composer 优先，无则可退回内置 PSR-4）
 ├── public/
-│   └── index.php             # 唯一入口
+│   └── index.php             # 唯一入口，20 行
 ├── src/                      # 框架代码（phpet\ 命名空间）
 │   ├── attribute/            # 注解定义
 │   │   ├── request/          # 取参注解
 │   │   └── validate/         # 校验注解
-│   └── core/                 # 容器、路由、请求响应、校验、日志
+│   └── core/                 # Application、容器、路由、请求响应、校验、日志
 ├── runtime/
 │   ├── cache/                # 路由缓存（自动生成，可随时删除）
 │   └── logs/                 # 日志（web 根之外，已 gitignore）
@@ -60,7 +90,28 @@ APP_DEBUG=1 php -S 127.0.0.1:8000 -t public public/index.php
 │   ├── e2e.php               # 端到端：php tests/e2e.php
 │   ├── cases/                # 用例，按被测单元分文件
 │   └── fixtures/             # 测试替身
-└── vendor/                   # composer 产物
+└── vendor/                   # composer 产物（可选）
+```
+
+`public/index.php` 的全部内容（略去 `use` 与注释）：
+
+```php
+require dirname(__DIR__) . '/bootstrap/autoload.php';
+
+(new Application([
+    'basePath'          => dirname(__DIR__),
+    'middlewares'       => ['auth' => AuthMiddleware::class, 'log' => LogMiddleware::class],
+    'globalMiddlewares' => ['cors'],
+]))->run();
+```
+
+`Application` 负责读配置、建容器、注册中间件、扫控制器、查路由、发响应，`run()` 只是「`Request::fromGlobals()` → `handle()` → `send()`」。
+
+需要嵌入到已有项目、或在测试里直接拿响应时，用 `handle()` 而不是 `run()`：
+
+```php
+$app = new Application(['basePath' => '/srv/app']);
+$response = $app->handle(Request::fromGlobals());   // 不发响应头，返回 Response
 ```
 
 PSR-4 映射：`phpet\` → `src/`，`app\` → `app/`。
@@ -556,7 +607,29 @@ $repo = $container->get(UserRepositoryInterface::class);
 
 ## 配置
 
-入口文件读环境变量：
+### Application 配置项
+
+`public/index.php` 里所有装配都收敛到 `Application`，可传的选项如下（未知键会直接抛 `InvalidArgumentException`，避免「配置没生效也不报错」）：
+
+| 选项 | 默认 | 说明 |
+| --- | --- | --- |
+| `basePath` | `getcwd()` | 项目根。其余路径都从它推导 |
+| `debug` | `APP_DEBUG` 环境变量 | 影响错误页细节、日志级别、是否跳过路由缓存 |
+| `controllerDir` | `{basePath}/app/controller` | 控制器扫描目录 |
+| `controllerNamespace` | `app\controller` | 与上面目录对应的命名空间 |
+| `cachePath` | `{basePath}/runtime/cache/routes.php` | 路由缓存文件 |
+| `cache` | `true` | 关掉后每次请求都重新扫描 |
+| `logDir` | `{basePath}/runtime/logs` | 日志目录 |
+| `logLevel` | debug ? `debug` : `info` | 日志最小级别 |
+| `timezone` | `APP_TIMEZONE`，否则 `Asia/Shanghai` | 传给 `date_default_timezone_set()` |
+| `middlewares` | `[]` | `名称 => 类名` 或 `名称 => [类名, [构造参数]]` |
+| `globalMiddlewares` | `[]` | 包在路由外层的中间件名，404 / 405 也会经过 |
+| `exceptionHandler` | 按 `debug` 自动创建 | 可换成自定义实现 |
+| `container` | 新建 | 传入已装配的容器 |
+
+路径全部从 `basePath` 推导、不依赖框架自身安装位置，所以整套代码放进 `vendor/` 也能正常工作。
+
+### 环境变量
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
@@ -597,7 +670,7 @@ Logger::error('db down', ['trace' => $e->getTraceAsString()]);
 不依赖 PHPUnit，零第三方依赖，clone 下来直接能跑：
 
 ```bash
-php tests/run.php                # 单元 + 集成：184 个用例
+php tests/run.php                # 单元 + 集成：201 个用例
 php tests/run.php router         # 只跑名称或文件名含 "router" 的用例
 php tests/run.php --no-color     # 关掉颜色
 php tests/e2e.php                # 端到端：起 php -S 打真实 HTTP
@@ -631,6 +704,7 @@ php tests/e2e.php                # 端到端：起 php -S 打真实 HTTP
 | `09_controller_scanner.php` | 前缀拼接、OPTIONS 占位、DTO 注入、缓存路径与扫描路径等价、按需实例化 |
 | `10_error_handler.php` | JSON / HTML 分支、debug 才透出细节、HTML 转义、`wantsHtml()` 矩阵 |
 | `11_logger.php` | 落盘格式、级别过滤、目录不可写时退回 `error_log()` |
+| `12_application.php` | 路径从 `basePath` 推导、未知配置项报错、`handle()` 不经 SAPI、中间件装配顺序、缓存命中 |
 | `e2e.php` | 真实请求下的 `$_SERVER` / `php://input` 解析、响应头下发、HEAD 空体、内容协商 |
 
 ### 写一个用例
@@ -653,8 +727,7 @@ test('路径归一：尾斜杠与重复斜杠', function () {
 
 ### 说明
 
-- 单元测试**不需要** `vendor/`：`bootstrap.php` 会退回内置 PSR-4 加载器
-- 端到端测试走的是 `public/index.php`，仍需先 `composer install`（该入口依赖 `vendor/autoload.php`）
+- 单元测试与端到端测试都**不需要** `vendor/`：`bootstrap/autoload.php` 找不到 `vendor/autoload.php` 时会退回内置 PSR-4 加载器
 - 测试期间日志写进系统临时目录，不会污染 `runtime/logs`
 - 退出码：全部通过 `0`，有失败 `1`，可直接接 CI
 
@@ -701,4 +774,5 @@ curl -s http://127.0.0.1:8000/nope -H 'Accept: text/html'
 - 内容协商按 `Accept` 里的**出现位置**判断，不解析 `q` 权重
 - 无 PSR-7 / PSR-15 兼容层，中间件签名是本框架自有约定
 - 未内置 ORM、模板引擎、i18n
+- `composer.json` 同时把 `phpet\` 映射到 `src/`、`app\` 映射到 `app/`。作为**依赖包**安装时，`app\` 这条会与宿主项目自己的 `app\` 争抢；当前分发形态是骨架一体式（`composer create-project`），不存在该问题，将来拆成「框架包 + 骨架包」时需把 `app\` 映射移出框架包
 

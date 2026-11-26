@@ -15,33 +15,8 @@ define('PHPET_TESTS', __DIR__);
 
 date_default_timezone_set('Asia/Shanghai');
 
-$composer = PHPET_ROOT . '/vendor/autoload.php';
-if (is_file($composer)) {
-    require $composer;
-} else {
-    // 没有 composer 时退回最小 PSR-4 加载器，
-    // 让 clone 下来不装依赖也能直接跑测试
-    spl_autoload_register(static function (string $class): void {
-        $map = [
-            'phpet\\' => 'src/',
-            'app\\'   => 'app/',
-        ];
-
-        foreach ($map as $prefix => $dir) {
-            if (!str_starts_with($class, $prefix)) {
-                continue;
-            }
-            $file = PHPET_ROOT . '/' . $dir
-                . str_replace('\\', '/', substr($class, strlen($prefix)))
-                . '.php';
-            if (is_file($file)) {
-                require $file;
-            }
-
-            return;
-        }
-    });
-}
+// 与 public/index.php 走同一个入口：有 composer 产物用它，没有就用内置 PSR-4
+require PHPET_ROOT . '/bootstrap/autoload.php';
 
 // 测试专用类（fixtures\*）不在 composer 的 PSR-4 映射里，单独注册。
 // 扫描器需要按「命名空间 + 文件路径」推出类名再 class_exists()，
